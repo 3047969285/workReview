@@ -5,7 +5,7 @@
 
 - `risk_theta()`：作业风险系数 θ（工作内容或作业类型取值为「装表接电」时 0.2；无风险计 0；未知按四级回退）；
 - `build_person_beta()`：由人员档案构建 班组->姓名->β 索引与 班组->负责人β 列表；
-- `classify_alert()`：四级预警分级（>100 判停工管控）。
+- `classify_alert()`：按 `ALERT_RULES` 降序命中。`apply_formula_config` 之后阈值只有 90/75/50，大于 90 为满载，大于 100% 仍是满载，没有停工档。
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def risk_theta(risk_level: Any, plan_type: Any = None, content: Any = None) -> f
     """作业风险系数 θ：无风险等级计 0；未知等级按四级(1.0)回退。
 
     工作内容是「装表接电」，或作业类型的取值是「装表接电」时，不看作业风险等级，
-    θ 取 RISK_COEF「装表接电」（配置为 0.2）。作业类型里只是含有「装表」不再改判五级。
+    θ 取 RISK_COEF「装表接电」（配置为 0.2）。其它含「装表」的文字按作业风险等级取值。
     """
     if _is_meter_install(content) or _is_meter_install(plan_type):
         return float(C.RISK_COEF.get("装表接电", 0.2))
@@ -47,7 +47,11 @@ def build_person_beta(
 
 
 def classify_alert(pct: float) -> str:
-    """四级预警分级：命中即返回（>100 判停工管控）。"""
+    """四级预警分级：按 ALERT_RULES 从高到低命中。
+
+    配置加载后只有 90/75/50 三档，大于 90（含大于 100）为满载，没有停工档。
+    未套配置时 constants 里的预置表仍可能含「停工(超满载)」，那不是现网口径。
+    """
     for threshold, level in C.ALERT_RULES:
         if pct > threshold:
             return level

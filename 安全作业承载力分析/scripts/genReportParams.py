@@ -21,7 +21,7 @@
       --template 报告-月                # 日 / 周 / 月
       --report-date 2026-09-30         # 可选：报告锚定日期，缺省取数据最后一天
       --config ../config/capacity_config.json  # 可选：组织架构/输入解析配置
-      --advice advice.json          # 出报告必填：{模板名: 正文}，须含本次模板非空建议
+      --advice advice.json          # CLI 兼容：validate_advice_for_templates 可能要求非空；正文不抄这份 JSON
       --office 落款机构名           # runReports 层报告/函件均必填（确认所属机构）
       --out params.json                # 输出 fillReport 参数 JSON
 
@@ -294,6 +294,8 @@ def _mgmt_aggregate(result: Dict[str, Any], lo: date, hi: date) -> Dict[str, Any
 
 _MGMT_TAIL = {
     "满载": "已接近或达到满载水平，请相关单位强化现场安全管控",
+    # 「停工(超满载)」只对应套配置前的预置预警名。apply_formula_config 之后
+    # classify_alert 只有 90/75/50，大于 100% 仍返回「满载」，不会命中这一键。
     "停工(超满载)": "已超过满载水平，请相关单位立即优化调整作业安排",
     "重载": "处于重载水平，请做好现场到位监督",
 }
@@ -507,10 +509,9 @@ def _matrix_table(unit_cap_by_day: Dict[str, Dict[str, float]],
     同月周只标日。另附 anchor（表前引导段关键词）供 fillReport 在转置
     后列头全为分类名、无法按表头唯一匹配时，精确锚定本表。
 
-    v2.6：spec 附 max_units_per_table=8 分块标记 —— 单位列数超过 8 时
-    fillReport 自动把本表纵向拆成上下堆叠的多个子表（每块 ≤8 个单位列，
-    首列「日期」行键在每块重复），防止 17+ 单位列总宽撑爆版心；
-    单位数 ≤8 时保持单表。
+    spec 带分块标记。当前 `_matrix_table` 写的是 max_units_per_table=6：
+    单位列数超过 6 时，fillReport 把本表纵向拆成上下堆叠的多个子表
+    （每块不超过 6 个单位列，首列「日期」在每块重复）。
     """
     union: List[str] = []
     for caps in unit_cap_by_day.values():
@@ -791,13 +792,12 @@ _BUILDERS = {
 
 
 # =============================================================================
-# AI 辅助建议注入（--advice）
+# 建议章占位（KEY_ADVICE_BODY）
 # =============================================================================
-
-# 占位符 key（模板文末「四、辅助建议与风险管控提示」章占位段；由 fillReport
-# 全文 replace 注入）。键=模板占位段完整壳文本（含引导语与「建议占位符：」），
-# 整段替换成纯建议正文，避免只换内层 token 时残留「建议占位符：」字样。
-# 模板占位段原文（三份报告模板一致）：
+# 模板文末占位壳由 fillReport 全文 replace 换成纯正文。
+# 三份报告实际写入的是 _advice_from_numbers 生成的计算句，不抄 --advice 的自由正文。
+# --advice / DEFAULT_ADVICE / _resolve_advice 仍保留，给 validate_advice_for_templates 做 CLI 兼容。
+# 模板占位段原文：
 #   （本期辅助建议由研判人员结合承载力数据综合提出。建议占位符：ADVICE_BODY_2026）
 KEY_ADVICE_BODY = "（本期辅助建议由研判人员结合承载力数据综合提出。建议占位符：ADVICE_BODY_2026）"
 
@@ -813,10 +813,10 @@ DEFAULT_ADVICE: Dict[str, str] = {
 
 
 def _resolve_advice(template: str, advice: Optional[Dict[str, str]]) -> str:
-    """从 --advice JSON（{模板名: 建议正文}）解析当前模板建议文本。
+    """从 --advice JSON 取出文本。调用方仍会传入，但建议章正文不使用返回值。
 
-    未提供该模板条目 / 条目为空 / 未传 --advice 时回退统一默认句。
-    已传 --advice 但缺本模板键时打告警（禁止静默用兜底冒充已分析）。
+    未提供该模板条目 / 条目为空 / 未传 --advice 时回退 DEFAULT_ADVICE。
+    已传 --advice 但缺本模板键时打告警。报告正文以 _advice_from_numbers 为准。
     """
     if isinstance(advice, dict):
         text = advice.get(template)
@@ -910,10 +910,7 @@ def build_main_parser() -> argparse.ArgumentParser:
                         metavar="PATH", help="capacity_config.json 路径")
     parser.add_argument("--advice", dest="advice_path", default=None,
                         metavar="PATH",
-                        help="AI 辅助建议 JSON（可选）：{模板名: 建议正文}，如 "
-                             "{\"报告-日\":\"…\",\"报告-周\":\"…\",\"报告-月\":\"…\"}；"
-                             "注入模板文末「四、辅助建议与风险管控提示」占位段；"
-                             "缺条目/未传时用统一默认句，保证占位不残留")
+                        help="CLI 兼容用的 advice JSON。建议章正文由 _advice_from_numbers 生成，不抄这份自由正文")
     parser.add_argument("--out", dest="out_path", required=True, metavar="PATH",
                         help="输出 fillReport 参数 JSON")
     return parser

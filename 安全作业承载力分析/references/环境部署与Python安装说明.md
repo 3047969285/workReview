@@ -82,16 +82,16 @@ pip config list
 # xlrd —— 读取 .xls/.xlsm 作业计划数据源（calcCapacity 依赖）  2.0.2 已含中文列兼容
 pip install xlrd==2.0.2
 
-# openpyxl —— 读取 .xlsx 数据源 / 输出结果表（calcCapacity、renderReportCharts）
+# openpyxl —— 读取 .xlsx 数据源（calcCapacity）；DrawingML 图表数据簿（office_chart / nativeCharts.py）
 pip install openpyxl
 
-# matplotlib —— 渲染 PNG 图表（renderReportCharts：承载/管理/作业类型图）
+# matplotlib —— PNG 图表（入口 scripts/pngCharts.py render）
 pip install matplotlib
 
-# Pillow —— 读取 PNG 原始宽高供等比缩放插图（applyCharts）
+# Pillow —— PNG 插入时读取原始宽高（入口 scripts/pngCharts.py apply）
 pip install Pillow
 
-# pywin32 —— Word COM 自动化（fillReport 填模板 / applyCharts 插图 / renderNativeCharts 原生 Chart），含 pythoncom
+# pywin32 —— Word COM（fillReport 填模板；pngCharts.py apply 插图；nativeCharts.py / office_chart 月报抛光），含 pythoncom
 pip install pywin32
 ```
 

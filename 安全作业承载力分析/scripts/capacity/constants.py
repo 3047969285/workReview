@@ -27,8 +27,10 @@ STD_HOURS_PER_DAY = 8
 # 作业时长 T 规整边界：不足 1 小时按 1 小时，超过 8 小时按 8 小时
 MIN_WORK_HOURS = 1.0
 MAX_WORK_HOURS = 8.0
-# 人员效能系数 β：当前阶段先统一按 1.0 代替（FORCE_BETA=True 时所有人按 1.0 计，
-# 输入里的 beta 字段暂不生效）；接入真实人员效能数据源后置 False 即恢复逐人读取
+# 人员效能系数 β。FORCE_BETA / DEFAULT_BETA 是套配置前的初值。
+# apply_formula_config 会用配置「强制统一β」「默认人员效能系数β」覆盖。
+# true：parse_person 让每个人都用默认 β。false：用档案「作业素养能力」，缺省才用默认 β。
+# 不是把 β 永久写死为 1.0。当前配置文件里「强制统一β」为 true。
 DEFAULT_BETA = 1.0
 FORCE_BETA = True
 # 工作负责人承载力上限钳制：避免除数过小导致数值异常放大
@@ -94,7 +96,10 @@ TEAM_KIND_DEFAULT = "检修施工"
 PATROL_TYPES: Tuple[str, ...] = ("巡视",)
 OPERATION_TYPES: Tuple[str, ...] = ("倒闸", "操作")
 
-# 四级预警分级规则：(阈值下界, 级别)，按降序匹配，命中即返回
+# 四级预警分级规则：(阈值下界, 级别)，按降序匹配，命中即返回。
+# 下面这组是 apply_formula_config 之前的预置表，仍含「停工(超满载)」。
+# 加载 capacity_config.json 后会被预警分级 90/75/50 整表替换：大于 90 为满载，
+# 大于 100% 也是满载，没有停工档。不要把预置表当成现网口径；现网以配置为准。
 ALERT_RULES: Tuple[Tuple[float, str], ...] = (
     (100.0, "停工(超满载)"),
     (90.0, "满载"),

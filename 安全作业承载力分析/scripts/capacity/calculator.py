@@ -128,10 +128,10 @@ def _team_denom(staff: float) -> float:
 def calc_team_staff(
     roster: Dict[str, Dict[str, Any]], team: str, absent: set
 ) -> float:
-    """班组可用人数（人员档案真实在册 Σβ − 当日不在岗 β）。
+    """班组可用人数（人员档案该班组在册 Σβ − 当日不在岗 β）。
 
-    计划班组可能多班组拼接（A-2、B-4），按拆分后的各班组在人员档案中的真实在册人数
-    求和；不再有"默认满编人数"回退（匹配不到的计划已在 roster 层整条剔除）。
+    日/周期计算前已用 iter_plan_team_slices 按班拆开，这里看到的是单个班组。
+    对不上档案的班组在拆分时跳过；一个班组都对不上的计划已由 filter_roster_matchable 去掉。
     """
     return max(roster_staff(roster, team, absent), 0.0)
 
@@ -143,7 +143,7 @@ def calc_leader_capacity(
     """工作负责人承载力指数 f_leader：负责人需求工时 ÷ 负责人可用人天；上限钳制。
 
     负责人可用人天 = 该(多)班组人员档案中工作负责人真名数 × 标准日工时（真实在册，
-    非默认值）；工作负责人为 0 时按极小分母计（判为超载 / 停工管控）。
+    非默认值）；工作负责人为 0 时按极小分母计，百分比会很高，套用配置后的预警落在满载，不是停工档。
     """
     resolved = resolve_team(roster, team)
     leader_count = len(resolved["leaders"]) if resolved else 0

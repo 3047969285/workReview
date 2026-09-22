@@ -122,7 +122,7 @@ def _parse_workbook(wb: Any, input_cfg: Dict[str, Any], path: str,
     manage_enabled = bool(_cfg_get(manage_cfg, "是否启用", False))
     # 人员档案现为真实分母的**必要数据源**（班组可用人数 / 工作负责人真名均来自此），
     # 不再以 β/管理承载力开关为条件：Excel 一律尝试加载；表缺失/非法时优雅降级为空
-    # （此时计划将因班组匹配不到而整条剔除，见 roster.filter_roster_matchable）。
+    # （人员档案为空时，一个班组都匹配不到，计划由 roster.filter_roster_matchable 剔除）。
     try:
         persons = _build_xls_persons(wb, input_cfg)
     except C.InputDataError as exc:
