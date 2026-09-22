@@ -163,7 +163,7 @@ use_scenarios: "供电公司作业计划承载力分析、安全作业承载力�
 | `genLetterParams.py` | 函件成套参数生成:读 calc 结果(matrix) + 计划源,按模板触发规则筛选命中单位 / 工作负责人,逐封产出 fillReport 可消费的 `{basename, replace, tables}`——满载(峰值>90%,警示函)/重载((75,90%],提示函)/长期作业(连续在岗≥阈值,每人一函);作业清单附表 10 列(外包两列「—」、负责人输出真名、文件名非法字符转全角);无命中返回空数组(非错误);`--result/--source/--template 警示函-满载|提示函-重载|提示函-长期作业/--report-date/--config/--out/--lo/--hi（自定义时间范围成对：满载/重载峰值、长期作业连续在岗、作业清单与函件区间文案均按范围判定，文号/周次仍按锚定日）` |
 | `pngCharts.py` | PNG 回退：`render` 出竖柱图，`apply` 插入成品。`--chart png` 时由 runReports 调用 |
 | `nativeCharts.py` | 薄入口 → `capacity.office_chart.native_main`（日/周/月 Word 可编辑竖柱；月报自动抛光） |
-| `capacity/office_chart.py` | DrawingML 注入 + **版面策略唯一源**（原 report_layout）+ `native_main`；改观感只改本文件版面策略区 |
+| `capacity/office_chart.py` | DrawingML 注入 + **版面策略唯一源** + `native_main`；改观感只改本文件版面策略区 |
 | `runReports.py` | 一键编排；日/周/月默认 `--chart native` 出 `.docx`；`--chart png` 回退 |
 
 ## 数据文件使用说明
