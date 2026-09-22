@@ -190,7 +190,10 @@ def _run(cmd: List[str], desc: str) -> None:
     mod_name = _SCRIPT_MAINS.get(script)
     if mod_name is None:
         raise RuntimeError(f"{desc} 失败：未知内置脚本 {script}")
-    if script in _COM_SCRIPTS:
+    # pngCharts render 不需要 Word；仅 fillReport / nativeCharts / pngCharts apply 起 COM
+    needs_word = script in ("fillReport.py", "nativeCharts.py") or (
+        script == "pngCharts.py" and len(cmd) > 1 and cmd[1] == "apply")
+    if needs_word:
         import fillReport as _fr
         if _fr.current_word_app() is None:
             _fr.begin_shared_word()

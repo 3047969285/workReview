@@ -341,7 +341,10 @@ import time
 
 from typing import Optional
 
-import win32com.client as win32
+try:
+    import win32com.client as win32
+except ImportError:  # Linux / 无 Word 时仍可 render PNG；apply 再要求 win32
+    win32 = None
 
 try:  # PIL 用于读取 PNG 原始宽高（等比缩放依据）
     from PIL import Image
@@ -1010,6 +1013,11 @@ def polish_native_layout(doc_path: str, report: str) -> int:
 
 
 def apply_main(argv=None):
+    if win32 is None:
+        print(json.dumps({"ok": False, "errorCode": "DEP_MISSING",
+                          "message": "未安装 pywin32 / 无法驱动 Word，无法 apply PNG"},
+                         ensure_ascii=False))
+        return 1
     ap = argparse.ArgumentParser(description="承载力报告动态图表插入")
     ap.add_argument("--doc", required=True)
     ap.add_argument("--report", choices=("day", "week", "month"), required=True)
