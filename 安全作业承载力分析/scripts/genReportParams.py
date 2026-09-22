@@ -539,7 +539,7 @@ def _matrix_table(unit_cap_by_day: Dict[str, Dict[str, float]],
         rows.append(row)
     return {"columns": columns, "rows": rows,
             "anchor": "各单位日计划如表所示",
-            "max_units_per_table": 8}
+            "max_units_per_table": 6}
 
 
 def _week_mean_caps(cap_by_day: Dict[str, Dict[str, float]],
@@ -563,6 +563,40 @@ def _weekly_job_paragraph(cap_by_day: Dict[str, Dict[str, float]], dataset,
 # =============================================================================
 
 
+def _advice_from_numbers(period: str, summary: Dict[str, int],
+                         profile: List[Tuple[str, float, List[str]]],
+                         mgmt: Dict[str, Any]) -> str:
+    """建议章只引用本次算出的项数、单位和百分比，不采用外部自由正文。"""
+    bits = [f"{period}日计划{summary.get('total', 0)}项"]
+    if summary.get("二级"):
+        bits.append(f"二级风险{summary['二级']}项")
+    if summary.get("三级"):
+        bits.append(f"三级风险{summary['三级']}项")
+    text = "，".join(bits) + "。"
+    ranked = sorted(
+        ((u, cap) for u, cap, _ in profile if cap > 0),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if ranked:
+        top = "、".join(f"{u}{cap:.1f}%" for u, cap in ranked[:3])
+        peak_u, peak_c = ranked[0]
+        if peak_c >= 90:
+            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，已达满载，请压缩该单位同期作业。"
+        elif peak_c >= 75:
+            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，处于重载，请统筹该单位作业安排。"
+        elif peak_c >= 50:
+            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，承载力适中。"
+        else:
+            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，承载力轻载。"
+        text += f"单位承载力居前的是{top}。{tone}"
+    cap = mgmt.get("管理承载力") if mgmt else None
+    if isinstance(cap, (int, float)):
+        text += f"管理承载力为{float(cap):.0f}%。"
+    text += "请各单位按实际承载力安排现场作业。"
+    return text
+
+
 def build_daily_params(result, dataset, normalizer,
                        report_date: date,
                        advice: Optional[str] = None,
@@ -583,7 +617,7 @@ def build_daily_params(result, dataset, normalizer,
         "二级风险作业X项": f"二级风险作业{summary['二级']}项",
         "三级风险作业X项": f"三级风险作业{summary['三级']}项",
         KEY_JOBBLOCK_A: _build_job_block(profile),
-        KEY_ADVICE_BODY: advice or DEFAULT_ADVICE["报告-日"],
+        KEY_ADVICE_BODY: _advice_from_numbers("当日", summary, profile, mgmt),
     }
     detail_rows = _build_detail_rows(p, normalizer,
                                      with_leader=True, with_members=True)
@@ -591,7 +625,9 @@ def build_daily_params(result, dataset, normalizer,
         # 本周期无三级及以上（或超限）计划可列：概况句不再以「…明细表如下：」
         # 悬挂，直接自然收尾；空明细表整体删除由 fillReport 按 rows=[] 处理。
         replace["三级及以上风险工作明细表如下："] = (
-            "当日无三级及以上风险作业，无需列示明细。")
+            "当日三级及以上风险作业不单列明细。")
+        replace[KEY_ADVICE_BODY] = _advice_from_numbers(
+            "当日", summary, profile, mgmt)
     return {
         "replace": replace,
         "paragraph_replace": [
@@ -637,14 +673,16 @@ def build_weekly_params(result, dataset, normalizer,
         "三级风险作业X项": f"三级风险作业{summary['三级']}项",
         KEY_JOBBLOCK_A: _build_job_block(profile),
         KEY_WEEK_DAILY_ANALYSIS: _week_over_analysis(cap_by_day, wk_lo, wk_hi),
-        KEY_ADVICE_BODY: advice or DEFAULT_ADVICE["报告-周"],
+        KEY_ADVICE_BODY: _advice_from_numbers("本周", summary, profile, mgmt),
     }
     detail_rows = _build_detail_rows(p, normalizer,
                                      with_leader=True, with_members=True,
                                      with_time=True)
     if not detail_rows:
         replace["三级及以上风险工作明细表如下："] = (
-            "本周无三级及以上风险作业，无需列示明细。")
+            "本周三级及以上风险作业不单列明细。")
+        replace[KEY_ADVICE_BODY] = _advice_from_numbers(
+            "本周", summary, profile, mgmt)
     # 周跨月时标题周也跨月（罕见），仍按报告星期号处理即可
     return {
         "replace": replace,
@@ -696,13 +734,15 @@ def build_monthly_params(result, dataset, normalizer,
         KEY_JOBBLOCK_A: _build_job_block(profile),
         # v2.12：全月管理评述句尾引用图2 全月管理承力图（无句号，模板段自带「。」保留）
         KEY_MONTH_MANAGE: _manage_sentence(f"全月", mgmt) + "，如图 3所示",
-        KEY_ADVICE_BODY: advice or DEFAULT_ADVICE["报告-月"],
+        KEY_ADVICE_BODY: _advice_from_numbers("本月", summary, profile, mgmt),
     }
     detail_rows = _build_detail_rows(p, normalizer,
                                      with_leader=False, with_time=True)
     if not detail_rows:
         replace["三级及以上风险工作明细表如下："] = (
-            "当月无三级及以上风险作业，无需列示明细。")
+            "当月三级及以上风险作业不单列明细。")
+        replace[KEY_ADVICE_BODY] = _advice_from_numbers(
+            "本月", summary, profile, mgmt)
     # 第1周标题（通用占位）与 2~5 周标题（模板硬编码 5 月示例）
     if w1:
         replace[KEY_WEEK_TITLE_GENERIC] = (

@@ -779,7 +779,13 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f"{no_box}"
         '<c:chart><c:autoTitleDeleted val="1"/>'
-        f'<c:plotArea>{no_box}<c:layout/>'
+        f'<c:plotArea>{no_box}'
+        '<c:layout><c:manualLayout>'
+        '<c:layoutTarget val="inner"/>'
+        '<c:xMode val="edge"/><c:yMode val="edge"/>'
+        '<c:x val="0.10"/><c:y val="0.06"/>'
+        '<c:w val="0.86"/><c:h val="0.78"/>'
+        '</c:manualLayout></c:layout>'
         f'<c:barChart><c:barDir val="{bar_dir}"/><c:grouping val="clustered"/>'
         '<c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/>'
         "<c:tx><c:v></c:v></c:tx>"
@@ -806,9 +812,10 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         f'<c:axPos val="{cat_pos}"/>'
         "<c:majorTickMark val=\"none\"/><c:minorTickMark val=\"none\"/>"
         "<c:tickLblPos val=\"nextTo\"/>"
+        '<c:lblAlgn val="ctr"/><c:lblOffset val="100"/>'
         f"{_tx_pr(0, cat_sz)}"
         "<c:crossAx val=\"2\"/>"
-        "<c:crosses val=\"autoZero\"/></c:catAx>"
+        "<c:crosses val=\"min\"/></c:catAx>"
         f'<c:valAx><c:axId val="2"/>{scaling}<c:delete val="0"/>'
         f'<c:axPos val="{val_pos}"/>'
         "<c:majorGridlines>"
@@ -819,7 +826,7 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         f"{_tx_pr(0)}"
         "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/>"
         f"{major}<c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"1\"/>"
-        "<c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/>"
+        "<c:crosses val=\"min\"/><c:crossBetween val=\"between\"/>"
         "</c:valAx></c:plotArea><c:plotVisOnly val=\"1\"/></c:chart>"
         '<c:externalData r:id="rId1"><c:autoUpdate val="0"/></c:externalData>'
         "</c:chartSpace>"
@@ -863,21 +870,21 @@ DETAIL_COL_PREF = {
     "人数": 40.0,
     "工作负责人": 48.0,
     "负责人": 48.0,
-    "单位": 48.0,
+    "单位": 78.0,
 }
 DETAIL_COL_DEFAULT = 52.0
 
 # ---------- 图高策略：只给区间，运行时按剩余空间取值 ----------
 # 全月作业/管理（图2+图3 同页）
 H_MONTH_MIN, H_MONTH_MAX = 110.0, 130.0
-# 每周两图同页
-H_WEEK_MIN, H_WEEK_MAX = 130.0, 148.0
+# 每周两图同页，图高拉到接近版心，避免一周一块下面大片空白
+H_WEEK_MIN, H_WEEK_MAX = 200.0, 250.0
 # 作业类型数量图：优先跟表末同页，否则独页放大
 H_TYPE_MIN, H_TYPE_MAX = 110.0, 200.0
 # 引导句+图注预留
 TYPE_TEXT_RESERVE_PT = 48.0
 # 周页标题/评述预留（两图分母）
-WEEK_TEXT_RESERVE_PT = 200.0
+WEEK_TEXT_RESERVE_PT = 110.0
 
 _WEEK_TITLE_RE = re.compile(r"^[1-5]\.\d+月份第[1-5]周")
 
@@ -895,6 +902,14 @@ def detail_col_widths(headers: List[str], text_w: float) -> List[float]:
     total = sum(prefs) or 1.0
     if abs(total - text_w) > 0.5:
         prefs = [w * text_w / total for w in prefs]
+    # 四字单位名（变电检修）在缩放后仍要单行放下
+    for i, h in enumerate(headers):
+        if "单位" in h and prefs[i] < 72.0:
+            need = 72.0 - prefs[i]
+            prefs[i] = 72.0
+            donor = max(range(len(prefs)), key=lambda j: prefs[j])
+            if donor != i:
+                prefs[donor] = max(36.0, prefs[donor] - need)
     return prefs
 
 
