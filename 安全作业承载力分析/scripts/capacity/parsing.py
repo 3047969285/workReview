@@ -18,9 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import constants as C
 from .constants import (ABSENCE_FIELD_ALIASES, FIELD_ALIASES,
-                        PERSON_FIELD_ALIASES, DEFAULT_BETA, FORCE_BETA,
-                        STD_HOURS_PER_DAY, InputDataError, FileAccessError,
-                        FileContentError)
+                        PERSON_FIELD_ALIASES, STD_HOURS_PER_DAY,
+                        InputDataError, FileAccessError, FileContentError)
 from .config import _cfg_get, _PLAN_CANON, DEFAULT_INPUT_CONFIG
 from .models import AbsenceRecord, PersonRecord, PlanRecord, WorkDataset
 
@@ -111,23 +110,26 @@ def parse_person(raw: Any, idx: int) -> PersonRecord:
     if not name:
         raise InputDataError(f"人员档案第 {idx} 条缺少姓名（name）", {"item": idx})
     team = str(_pick(raw, PERSON_FIELD_ALIASES["team"]) or "未分配")
-    # 人员效能系数 β：当前阶段先统一按 1.0 代替；
-    # 接入真实人员效能数据源后，置 FORCE_BETA=False 即恢复从输入字段逐人读取
-    if FORCE_BETA:
-        beta = DEFAULT_BETA
+    # 人员效能系数 β 在调用时读 constants。apply_formula_config 改的是模块属性，
+    # 不能在本文件导入时把 FORCE_BETA / DEFAULT_BETA 绑死。
+    # 强制统一β 为真：每个人都用配置里的默认 β。为假：用档案「作业素养能力」，缺省才用默认 β。
+    if C.FORCE_BETA:
+        beta = C.DEFAULT_BETA
     else:
-        # β 仅在缺省（None）时取 1.0；值为 0 需原样保留，避免改变原口径
+        # β 仅在缺省（None）时取默认值；值为 0 需原样保留，避免改变原口径
         beta_raw = _pick(raw, PERSON_FIELD_ALIASES["beta"])
-        beta = to_float(DEFAULT_BETA if beta_raw is None else beta_raw,
+        beta = to_float(C.DEFAULT_BETA if beta_raw is None else beta_raw,
                         f"人员{name}的beta")
     if beta <= 0:
         raise InputDataError(f"人员「{name}」的 β 需为正数，当前：{beta}",
                              {"name": name})
+    kind_raw = _pick(raw, PERSON_FIELD_ALIASES["team_kind"])
     return PersonRecord(name=str(name), team=team, beta=round(beta, 4),
                         is_leader=_parse_bool(_pick(raw, PERSON_FIELD_ALIASES["is_leader"])),
                         county=str(_pick(raw, PERSON_FIELD_ALIASES["county"]) or ""),
                         work_area=str(_pick(raw, PERSON_FIELD_ALIASES["work_area"]) or ""),
-                        role=str(_pick(raw, PERSON_FIELD_ALIASES["role"]) or ""))
+                        role=str(_pick(raw, PERSON_FIELD_ALIASES["role"]) or ""),
+                        team_kind=str(kind_raw).strip() if kind_raw not in (None, "") else "")
 
 
 def parse_plan(raw: Any, idx: int) -> PlanRecord:
@@ -175,6 +177,7 @@ def parse_plan(raw: Any, idx: int) -> PlanRecord:
             leader_count = 1
     risk = _pick(raw, FIELD_ALIASES["risk"])
     plan_type = str(_pick(raw, FIELD_ALIASES["type"]) or "")
+    content = str(_pick(raw, FIELD_ALIASES["content"]) or "").strip()
     company_raw = _pick(raw, FIELD_ALIASES["company"])
     work_area_raw = _pick(raw, FIELD_ALIASES["work_area"])
     return PlanRecord(name=name, team=str(team), leader=leader_str,
@@ -182,7 +185,8 @@ def parse_plan(raw: Any, idx: int) -> PlanRecord:
                       risk=str(risk) if risk not in (None, "") else None,
                       plan_type=plan_type, start=start, end=end,
                       company=str(company_raw) if company_raw not in (None, "") else None,
-                      work_area=str(work_area_raw) if work_area_raw not in (None, "") else None)
+                      work_area=str(work_area_raw) if work_area_raw not in (None, "") else None,
+                      content=content)
 
 
 def parse_absence(raw: Any, idx: int) -> AbsenceRecord:

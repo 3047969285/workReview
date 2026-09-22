@@ -629,8 +629,9 @@ def build_weekly_params(result, dataset, normalizer,
     m = report_date.month
     replace = {
         "2026年X月份第X周": f"2026年{m}月份第{ordinal}周",
+        # 只去掉周报概况这一处日期范围的全角括号；月报各周标题仍保留括号。
         KEY_WEEK_TITLE_GENERIC:
-            f"{m}月份第{ordinal}周（{_fmt_d(wk_lo)}至{_fmt_d(wk_hi)}）",
+            f"{m}月份第{ordinal}周{_fmt_d(wk_lo)}至{_fmt_d(wk_hi)}",
         "日计划X项": f"日计划{summary['total']}项",
         "二级风险作业X项": f"二级风险作业{summary['二级']}项",
         "三级风险作业X项": f"三级风险作业{summary['三级']}项",

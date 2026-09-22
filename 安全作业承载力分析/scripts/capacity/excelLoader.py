@@ -12,8 +12,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import constants as C
-from .constants import (DEFAULT_BETA, FORCE_BETA, InputDataError,
-                        FileAccessError, FileContentError)
+from .constants import (InputDataError, FileAccessError, FileContentError)
 from .config import _cfg_get, DEFAULT_INPUT_CONFIG
 from .parsing import _rows_to_plans, build_dataset
 from .models import WorkDataset
@@ -87,9 +86,10 @@ def _build_xls_persons(wb: Any, input_cfg: Dict[str, Any]) -> List[Dict[str, Any
         beta_col = cmap.get("人员效能系数β")
         if beta_col and str(beta_col) in header2idx:
             bv = _sheet_cell(sh, r, header2idx[str(beta_col)])
-            beta = DEFAULT_BETA if bv in (None, "") or str(bv).strip() == "无" else float(bv)
+            # 空单元格在这里先填当前默认 β；是否改用档案值由 parse_person 按当时的 FORCE_BETA 决定
+            beta = C.DEFAULT_BETA if bv in (None, "") or str(bv).strip() == "无" else float(bv)
         else:
-            beta = DEFAULT_BETA
+            beta = C.DEFAULT_BETA
         is_leader = any(k in role_mark for k in keywords)
         def _opt(column_key: str) -> str:
             col = cmap.get(column_key)
@@ -102,7 +102,8 @@ def _build_xls_persons(wb: Any, input_cfg: Dict[str, Any]) -> List[Dict[str, Any
                     "is_leader": is_leader,
                     "county": _opt("县公司"),
                     "work_area": _opt("单位（工区）"),
-                    "role": f"{role_mark} {_opt('职务')}".strip()})
+                    "role": f"{role_mark} {_opt('职务')}".strip(),
+                    "team_kind": _opt("班组类型")})
     C.LOGGER.info("人员档案解析 %d 条（来自工作表「%s」）", len(out), sheet)
     return out
 

@@ -25,6 +25,8 @@ class PersonRecord:
     county: str = ""
     work_area: str = ""
     role: str = ""
+    # 人员档案「班组类型」（检修施工 / 运检合一 / 变电运维等）。空串表示该人没填。
+    team_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class PlanRecord:
     # 业主单位公司 / 工区：供组织架构归一化到报告矩阵的单位列（未启用时恒为 None）
     company: Optional[str] = None
     work_area: Optional[str] = None
+    # 工作内容。取值正好是「装表接电」时，θ 按 0.2，不看作业风险等级。
+    content: str = ""
 
 
 @dataclass(frozen=True)

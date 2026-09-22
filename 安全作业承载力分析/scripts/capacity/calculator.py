@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import constants as C
 from .coefficients import build_person_beta, classify_alert, risk_theta
 from .org import UnitNormalizer, filter_matchable
-from .roster import build_roster_index, filter_roster_matchable, resolve_team, roster_staff
+from .roster import (build_roster_index, filter_roster_matchable, iter_plan_team_slices,
+                      resolve_team, roster_staff, split_team_tokens)
 from .models import AbsenceRecord, PersonRecord, PlanRecord, WorkDataset
 
 # 单日班组聚合中间量
@@ -156,6 +157,18 @@ def calc_member_capacity(team_acc: TeamAcc, staff: float) -> float:
     return team_acc["成员工时"] / denom if team_acc["成员工时"] else 0.0
 
 
+def _team_kind_for(roster: Dict[str, Dict[str, Any]], team: str) -> str:
+    """该班组在人员档案里的班组类型。没有类型或几种类型并列时，用配置默认。"""
+    found: List[str] = []
+    for token in split_team_tokens(team):
+        kind = (roster.get(token) or {}).get("team_kind")
+        if kind and kind not in found:
+            found.append(kind)
+    if len(found) == 1:
+        return found[0]
+    return C.TEAM_KIND_DEFAULT
+
+
 def calc_team_capacity(
     team: str, team_acc: TeamAcc,
     roster: Dict[str, Dict[str, Any]],
@@ -163,9 +176,10 @@ def calc_team_capacity(
 ) -> Dict[str, Any]:
     """【班组承载力】入口：负责人 / 班组成员 / 班组综合，及四级预警与单位归列。
 
-    班组综合 f_team = max(f_leader, f_member)，按班组类型组合扩展：
-    检修施工=仅取 max；运检合一=+巡视；变电运维=操作工时占比+巡视。
-    分母（可用人数）来自人员档案真实在册人数（多班组按拆分求和），非默认值。
+    班组综合按该班组自己的「班组类型」（人员档案），不是全局一个默认值：
+    检修施工=max(负责人, 成员)；运检合一=max(负责人, 成员)+巡视；变电运维=操作+巡视。
+    档案里没有类型时用配置「默认班组类型」。调控等未单列的类型走检修施工这一支。
+    分母是这个班组自己的在册人数，不是多个班组在册人数之和。
     """
     staff = calc_team_staff(roster, team, absent)
     denom = _team_denom(staff)
@@ -173,10 +187,11 @@ def calc_team_capacity(
     f_member = calc_member_capacity(team_acc, staff)
     f_patrol = team_acc["巡视工时"] / denom if team_acc["巡视工时"] else 0.0
 
+    kind = _team_kind_for(roster, team)
     f_team = max(f_leader, f_member)
-    if C.TEAM_KIND_DEFAULT == "运检合一":
+    if kind == "运检合一":
         f_team = max(f_leader, f_member) + f_patrol
-    elif C.TEAM_KIND_DEFAULT == "变电运维":
+    elif kind == "变电运维":
         f_team = team_acc["操作工时"] / denom + f_patrol
 
     return {
@@ -221,40 +236,41 @@ def calc_day(
     absent = _day_absent_names(dataset.absences, d)
     teams: Dict[str, TeamAcc] = {}
 
-    for plan in day_plans:
-        team_acc = teams.setdefault(plan.team, {
-            "负责人需求": [], "负责人工时": 0.0, "成员工时": 0.0,
-            "巡视工时": 0.0, "操作工时": 0.0, "成员人数": 0,
-            "负责人分组": {},
-            "成员日小时": 0.0, "巡视日小时": 0.0, "操作日小时": 0.0,
-            "company": None, "work_area": None,
-        })
-        # 记录班组首个可用的公司 / 工区，供组织架构归一化
-        if team_acc["company"] is None and plan.company:
-            team_acc["company"] = plan.company
-        if team_acc["work_area"] is None and plan.work_area:
-            team_acc["work_area"] = plan.work_area
-        t = plan.hours
-        theta = risk_theta(plan.risk, plan.plan_type)
-        # 工作负责人列 = 需要的负责人数量：负责人需求按该数量计（β 统一 1.0）
-        leader_beta = C.DEFAULT_BETA
-        team_acc["负责人需求"].append({"hours": t, "theta": theta, "beta": leader_beta,
-                                       "count": plan.leader_count})
-        # 负责人按"人"分组累计（原始小时 + 加权需求），供 8h 截断；需求按负责人数量计
-        leader_key = plan.leader or ""
-        lg = team_acc["负责人分组"].setdefault(leader_key, {"hours": 0.0, "weighted": 0.0})
-        lg["hours"] += t
-        lg["weighted"] += t * theta * leader_beta * plan.leader_count
-        # 组员效能统一取 1.0 简化；有档案时可按实际人员项累加
-        team_acc["成员工时"] += t * theta * plan.members
-        team_acc["成员日小时"] += t  # 班组当日作业小时合计（每人实际工时基数）
-        team_acc["成员人数"] += plan.members
-        if plan.plan_type in C.PATROL_TYPES:
-            team_acc["巡视工时"] += t * plan.members
-            team_acc["巡视日小时"] += t
-        if plan.plan_type in C.OPERATION_TYPES:
-            team_acc["操作工时"] += t * plan.members
-            team_acc["操作日小时"] += t
+    for raw_plan in day_plans:
+        for plan in iter_plan_team_slices(raw_plan, roster):
+            team_acc = teams.setdefault(plan.team, {
+                "负责人需求": [], "负责人工时": 0.0, "成员工时": 0.0,
+                "巡视工时": 0.0, "操作工时": 0.0, "成员人数": 0,
+                "负责人分组": {},
+                "成员日小时": 0.0, "巡视日小时": 0.0, "操作日小时": 0.0,
+                "company": None, "work_area": None,
+            })
+            # 记录班组首个可用的公司 / 工区，供组织架构归一化
+            if team_acc["company"] is None and plan.company:
+                team_acc["company"] = plan.company
+            if team_acc["work_area"] is None and plan.work_area:
+                team_acc["work_area"] = plan.work_area
+            t = plan.hours
+            theta = risk_theta(plan.risk, plan.plan_type, plan.content)
+            # 工作负责人列 = 需要的负责人数量：负责人需求按该数量计（β 读配置默认值）
+            leader_beta = C.DEFAULT_BETA
+            team_acc["负责人需求"].append({"hours": t, "theta": theta, "beta": leader_beta,
+                                           "count": plan.leader_count})
+            # 负责人按"人"分组累计（原始小时 + 加权需求），供 8h 截断；需求按负责人数量计
+            leader_key = plan.leader or ""
+            lg = team_acc["负责人分组"].setdefault(leader_key, {"hours": 0.0, "weighted": 0.0})
+            lg["hours"] += t
+            lg["weighted"] += t * theta * leader_beta * plan.leader_count
+            # 组员效能统一取 1.0 简化；有档案时可按实际人员项累加
+            team_acc["成员工时"] += t * theta * plan.members
+            team_acc["成员日小时"] += t  # 班组当日作业小时合计（每人实际工时基数）
+            team_acc["成员人数"] += plan.members
+            if plan.plan_type in C.PATROL_TYPES:
+                team_acc["巡视工时"] += t * plan.members
+                team_acc["巡视日小时"] += t
+            if plan.plan_type in C.OPERATION_TYPES:
+                team_acc["操作工时"] += t * plan.members
+                team_acc["操作日小时"] += t
 
     # 第二遍：每人每日“实际工时”≤8h 截断（ΣT>8 → 按 8/ΣT 比例压缩）
     for team_acc in teams.values():
@@ -286,7 +302,8 @@ def calc_day(
 # =============================================================================
 
 
-def calc_period(dataset: WorkDataset, start: date, end: date) -> Dict[str, Any]:
+def calc_period(dataset: WorkDataset, start: date, end: date,
+                roster: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """【周期承载力】入口：周 / 月 / 年度聚合。
 
     分子：区间内全部自然日的计划工时（周六日/法定节假日有计划的天照常累加）。
@@ -305,11 +322,12 @@ def calc_period(dataset: WorkDataset, start: date, end: date) -> Dict[str, Any]:
             )
             staff = max(day_beta_sum, 0.0)
             denom_sum += C.STD_HOURS_PER_DAY * max(staff, C.DENOM_EPS)
-        for plan in _on_day_plans(dataset.plans, d):
-            theta = risk_theta(plan.risk, plan.plan_type)
-            # 负责人需求按"需要的负责人数量"计（β 统一 1.0）
-            agg["负责人工时"] += plan.hours * theta * C.DEFAULT_BETA * plan.leader_count
-            agg["成员工时"] += plan.hours * theta * plan.members
+        for raw_plan in _on_day_plans(dataset.plans, d):
+            for plan in iter_plan_team_slices(raw_plan, roster):
+                theta = risk_theta(plan.risk, plan.plan_type, plan.content)
+                # 负责人需求按"需要的负责人数量"计（β 读配置默认值；多班组只记在第一条）
+                agg["负责人工时"] += plan.hours * theta * C.DEFAULT_BETA * plan.leader_count
+                agg["成员工时"] += plan.hours * theta * plan.members
 
     f_leader = agg["负责人工时"] / max(denom_sum, C.DENOM_EPS)
     f_member = agg["成员工时"] / max(denom_sum, C.DENOM_EPS)
@@ -525,7 +543,8 @@ class CapacityService:
         # 保证单位列与正文/明细口径一致（用户口径：匹配不到组织架构的不统计）
         if self.normalizer.enabled:
             self.dataset = filter_matchable(self.dataset, self.normalizer)
-        # 匹配不到人员档案班组的计划整条剔除（用户口径：匹配不到不计算，不瞎设分母/不瞎写）
+        # 一个班组都匹配不到的计划整条剔除。多班组只是部分对不上时保留，
+        # 计算时按班组拆开，跳过没对上的人。
         self.dataset = filter_roster_matchable(self.dataset, self.roster)
         # 管理承载力启用开关（配置「输入解析.管理承载力.是否启用」）
         self.manage_enabled = bool((manage_cfg or {}).get("是否启用", False))
@@ -534,7 +553,7 @@ class CapacityService:
         return calc_day(self.dataset, self.normalizer, self.beta_map, self.roster, d)
 
     def calc_period(self, start: date, end: date) -> Dict[str, Any]:
-        return calc_period(self.dataset, start, end)
+        return calc_period(self.dataset, start, end, self.roster)
 
     def summarize(self, period: str = "日") -> Dict[str, Any]:
         """全量输出：persons_beta + 逐日 + 周期分桶 + (可选)日期×单位矩阵。
