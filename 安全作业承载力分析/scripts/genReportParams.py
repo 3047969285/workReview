@@ -598,34 +598,115 @@ def _weekly_job_paragraph(cap_by_day: Dict[str, Dict[str, float]], dataset,
 
 def _advice_from_numbers(period: str, summary: Dict[str, int],
                          profile: List[Tuple[str, float, List[str]]],
-                         mgmt: Dict[str, Any]) -> str:
-    """建议章只引用本次算出的项数、单位和百分比，不采用外部自由正文。"""
-    bits = [f"{period}日计划{summary.get('total', 0)}项"]
-    for level in ("三级", "四级", "五级"):
-        bits.append(f"{level}风险{summary.get(level, 0)}项")
-    text = "，".join(bits) + "。"
-    ranked = sorted(
-        ((u, cap) for u, cap, _ in profile if cap > 0),
-        key=lambda item: item[1],
-        reverse=True,
+                         mgmt: Dict[str, Any],
+                         plans: Optional[list] = None,
+                         normalizer: Optional[UnitNormalizer] = None) -> str:
+    """辅助建议六维短意见（与 SKILL「辅助建议六维」一致），只引用本次计算数字。"""
+    full = [(u, cap) for u, cap, _ in profile if cap >= 90]
+    heavy = [(u, cap) for u, cap, _ in profile if 75 <= cap < 90]
+    caps = [cap for _, cap, _ in profile]
+    peak = max(caps) if caps else 0.0
+    if peak >= 90:
+        overall = "偏紧"
+    elif peak >= 75:
+        overall = "偏重"
+    elif peak >= 50:
+        overall = "适中"
+    else:
+        overall = "轻载"
+
+    def _fmt_units(pairs: List[Tuple[str, float]], limit: int = 4) -> str:
+        if not pairs:
+            return "无"
+        body = "、".join(f"{u}{cap:.1f}%" for u, cap in pairs[:limit])
+        if len(pairs) > limit:
+            body += f"等{len(pairs)}家"
+        return body
+
+    focus = "、".join(u for u, _ in (full or heavy)[:3]) or "各单位"
+    # ① 负荷态势
+    parts = [
+        f"【判断】{period}作业承载力总体{overall}。"
+        f"满载单位：{_fmt_units(full)}；重载单位：{_fmt_units(heavy)}。"
+        f"矛盾主要集中在{focus}。"
+    ]
+
+    # ② 高风险叠加
+    n3 = int(summary.get("三级", 0) or 0)
+    n4 = int(summary.get("四级", 0) or 0)
+    n5 = int(summary.get("五级", 0) or 0)
+    risk_line = (
+        f"【风险】本周期三级{n3}项、四级{n4}项、五级{n5}项。"
     )
-    if ranked:
-        top = "、".join(f"{u}{cap:.1f}%" for u, cap in ranked[:3])
-        peak_u, peak_c = ranked[0]
-        if peak_c >= 90:
-            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，已达满载，请压缩该单位同期作业。"
-        elif peak_c >= 75:
-            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，处于重载，请统筹该单位作业安排。"
-        elif peak_c >= 50:
-            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，承载力适中。"
-        else:
-            tone = f"峰值单位{peak_u}为{peak_c:.1f}%，承载力轻载。"
-        text += f"单位承载力居前的是{top}。{tone}"
+    hot_units = {u for u, _ in full + heavy}
+    overlap: List[str] = []
+    if plans is not None and normalizer is not None and hot_units:
+        by_unit: Dict[str, int] = {}
+        for p in plans:
+            if str(p.risk or "") != "三级":
+                continue
+            u = _unit_of_plan(normalizer, p)
+            if u in hot_units:
+                by_unit[u] = by_unit.get(u, 0) + 1
+        overlap = [f"{u}三级{c}项" for u, c in sorted(
+            by_unit.items(), key=lambda kv: kv[1], reverse=True)[:4]]
+    if overlap:
+        risk_line += (
+            f"其中{'、'.join(overlap)}，与满载/重载区间重叠，"
+            f"存在「高负荷+高风险」叠加，须重点盯防。"
+        )
+    elif full or heavy:
+        risk_line += "满载/重载单位须严控与三级风险作业的时段叠加。"
+    else:
+        risk_line += "本期未出现满载/重载与三级风险的显著叠加。"
+    parts.append(risk_line)
+
+    # ③ 人员与管理
     cap = mgmt.get("管理承载力") if mgmt else None
     if isinstance(cap, (int, float)):
-        text += f"管理承载力为{float(cap):.0f}%。"
-    text += "请各单位按实际承载力安排现场作业。"
-    return text
+        mgmt_bit = f"全网管理承载力{float(cap):.0f}%"
+        if float(cap) >= 75:
+            mgmt_bit += "，管理侧已偏紧，到岗到位不得放松"
+        elif full or heavy:
+            mgmt_bit += "，总体可支撑，但满载/重载单位检查频次应高于常规"
+        else:
+            mgmt_bit += "，现场管理人员总体满足管控需求"
+        parts.append(f"【管理】{mgmt_bit}。")
+    else:
+        parts.append("【管理】管理承载力数据不足，仍按到岗到位要求从严管控。")
+
+    # ④ 计划统筹
+    measures: List[str] = []
+    if full:
+        names = "、".join(u for u, _ in full[:4])
+        measures.append(
+            f"对{names}：立即组织计划清理，非紧急四级/五级作业错峰或暂缓，"
+            f"满载解除前原则上不新增长周期作业"
+        )
+    if heavy:
+        names = "、".join(u for u, _ in heavy[:4])
+        measures.append(
+            f"对{names}：控制新增计划，优先保障已批复三级及紧急消缺"
+        )
+    if not measures:
+        measures.append("各单位按预警分级动态管控，保持计划与现场力量匹配")
+    else:
+        measures.append("其他单位按预警分级动态管控")
+    numbered = "；".join(f"{i}．{m}" for i, m in enumerate(measures, start=1))
+    parts.append(f"【措施】{numbered}。")
+
+    # ⑤ 责任时限
+    owners = "、".join(u for u, _ in (full or heavy)[:4]) or "相关单位"
+    parts.append(
+        f"【反馈】请{owners}安监会同生产部门于下一工作日前反馈计划调整结果。"
+    )
+
+    # ⑥ 例外底线
+    parts.append(
+        "【底线】涉及保电、紧急消缺、重大风险管控的作业，须履行审批后实施，"
+        "不得简单取消。"
+    )
+    return "".join(parts)
 
 
 def build_daily_params(result, dataset, normalizer,
@@ -648,7 +729,8 @@ def build_daily_params(result, dataset, normalizer,
         "三级风险作业X项、四级风险作业X项、五级风险作业X项":
             _risk_count_phrase(summary),
         KEY_JOBBLOCK_A: _build_job_block(profile),
-        KEY_ADVICE_BODY: _advice_from_numbers("当日", summary, profile, mgmt),
+        KEY_ADVICE_BODY: _advice_from_numbers(
+            "当日", summary, profile, mgmt, plans=p, normalizer=normalizer),
     }
     detail_level = _pick_detail_risk_level(summary)
     detail_rows = _build_detail_rows(
@@ -700,7 +782,8 @@ def build_weekly_params(result, dataset, normalizer,
             _risk_count_phrase(summary),
         KEY_JOBBLOCK_A: _build_job_block(profile),
         KEY_WEEK_DAILY_ANALYSIS: _week_over_analysis(cap_by_day, wk_lo, wk_hi),
-        KEY_ADVICE_BODY: _advice_from_numbers("本周", summary, profile, mgmt),
+        KEY_ADVICE_BODY: _advice_from_numbers(
+            "本周", summary, profile, mgmt, plans=p, normalizer=normalizer),
     }
     detail_level = _pick_detail_risk_level(summary)
     detail_rows = _build_detail_rows(
@@ -758,7 +841,8 @@ def build_monthly_params(result, dataset, normalizer,
         KEY_JOBBLOCK_A: _build_job_block(profile),
         # v2.12：全月管理评述句尾引用图2 全月管理承力图（无句号，模板段自带「。」保留）
         KEY_MONTH_MANAGE: _manage_sentence(f"全月", mgmt) + "，如图 3所示",
-        KEY_ADVICE_BODY: _advice_from_numbers("本月", summary, profile, mgmt),
+        KEY_ADVICE_BODY: _advice_from_numbers(
+            "本月", summary, profile, mgmt, plans=p, normalizer=normalizer),
     }
     detail_level = _pick_detail_risk_level(summary)
     detail_rows = _build_detail_rows(
