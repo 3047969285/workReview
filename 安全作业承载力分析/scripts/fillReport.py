@@ -165,6 +165,17 @@ def current_word_app():
     return _SHARED_APP
 
 
+def word_com_available() -> bool:
+    """Linux 云端没有 Word/WPS COM。无 COM 时走 python-docx + DrawingML。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import win32com.client  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 def _launch_word_app():
     """DispatchEx 隔离新实例：先 Word.Application，失败再试 WPS ProgID。"""
     import win32com.client as win32
@@ -794,14 +805,8 @@ class WordSession:
                 pass
             return
 
-        # v2.6：矩阵型表（spec 带 max_units_per_table 标记）单位列数超阈值时
-        # 自动纵切多张上下堆叠子表（每块 ≤ 阈值单位列、首列行键重复），防列数
-        # 过多撑爆版心；明细表等无标记 spec 走单表填充。
-        max_units = spec.get("max_units_per_table")
-        if max_units is not None and len(columns) - 1 > int(max_units):
-            self._fill_matrix_chunked(doc, target, columns, rows, int(max_units))
-        else:
-            self._fill_table_data(doc, target, columns, rows)
+        # 一张表填完：列宽约两个汉字，多余字在格内换行，不拆「续表」。
+        self._fill_table_data(doc, target, columns, rows)
 
     def _fill_table_data(self, doc, target, columns: List[str],
                          rows: List[List[Any]]) -> None:
@@ -1259,6 +1264,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                           "message": f"输出文件名含非法字符 {bad_fn}：{args.out_path}"},
                          ensure_ascii=False))
         return EXIT_IO
+
+    if not word_com_available():
+        if out_as_doc:
+            LOGGER.error("当前环境没有 Word COM，无法写出 .doc：%s", out_path)
+            print(json.dumps({"ok": False, "errorCode": ERR_OUTPUT_WRITE_FAILED,
+                              "message": "无 Word COM，请把 --out 改成 .docx"},
+                             ensure_ascii=False))
+            return EXIT_IO
+        try:
+            from fillReportLinux import fill_docx
+            fill_docx(template_path, params, out_path)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Linux 填充失败")
+            print(json.dumps({"ok": False, "errorCode": ERR_UNEXPECTED,
+                              "message": f"Linux 填充失败：{exc}"},
+                             ensure_ascii=False))
+            return EXIT_UNEXPECTED
+        print(json.dumps({"ok": True, "template": args.template, "out": out_path,
+                          "engine": "python-docx"}, ensure_ascii=False))
+        return EXIT_OK
 
     session = WordSession()
     try:

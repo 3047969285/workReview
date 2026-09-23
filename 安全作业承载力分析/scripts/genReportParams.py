@@ -509,9 +509,7 @@ def _matrix_table(unit_cap_by_day: Dict[str, Dict[str, float]],
     同月周只标日。另附 anchor（表前引导段关键词）供 fillReport 在转置
     后列头全为分类名、无法按表头唯一匹配时，精确锚定本表。
 
-    spec 带分块标记。当前 `_matrix_table` 写的是 max_units_per_table=6：
-    单位列数超过 6 时，fillReport 把本表纵向拆成上下堆叠的多个子表
-    （每块不超过 6 个单位列，首列「日期」在每块重复）。
+    全部单位列写在同一张表里，列宽约两个汉字，表头和数值在格内换行，不拆续表。
     """
     union: List[str] = []
     for caps in unit_cap_by_day.values():
@@ -539,8 +537,7 @@ def _matrix_table(unit_cap_by_day: Dict[str, Dict[str, float]],
             row.append(int(round(v)) if v is not None else "-")
         rows.append(row)
     return {"columns": columns, "rows": rows,
-            "anchor": "各单位日计划如表所示",
-            "max_units_per_table": 6}
+            "anchor": "各单位日计划如表所示"}
 
 
 def _week_mean_caps(cap_by_day: Dict[str, Dict[str, float]],

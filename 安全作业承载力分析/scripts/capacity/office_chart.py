@@ -244,11 +244,13 @@ def reflow_month_type_chart(docx_path: str) -> Dict[str, float]:
     parts["word/document.xml"] = new_doc.encode("utf-8")
     _write_zip(parts, path)
 
+    com_info: Dict[str, float] = {"com_ok": 0.0}
     try:
-        com_info = polish_month_docx(path)
+        from fillReport import word_com_available
+        if word_com_available():
+            com_info = polish_month_docx(path)
     except Exception as exc:  # noqa: BLE001
         com_info = {"com_ok": 0.0, "error": 0.0}
-        # 保留可诊断字段但不抛死流水线
         _ = str(exc)
     return {
         "ok": 1.0,
@@ -276,6 +278,7 @@ def apply_month_fixed_pages(docx_path: str) -> Dict[str, int]:
         parts = {name: zin.read(name) for name in zin.namelist()}
     doc_xml = parts["word/document.xml"].decode("utf-8")
     paras = _PARA_RE.findall(doc_xml)
+    paras = _drop_month_blank_paragraphs(paras)
     week_re = re.compile(r"^([1-5])\..*第[1-5]周")
     overview_keys = ("各作业类型日计划数量如下图所示",)
     unit_section_re = re.compile(r"^二、公司各单位")
@@ -296,13 +299,14 @@ def apply_month_fixed_pages(docx_path: str) -> Dict[str, int]:
             continue
         wm = week_re.match(text)
         if wm:
-            # 第1周跟「（二）」同页，清硬分页；第2～5周换页
+            # 第1周跟「（二）」同页，标题与后文 keepNext；第2～5周各自换页
             if wm.group(1) == "1":
                 paras[i] = _clear_page_break_before(para)
                 n_week1_cleared += 1
             else:
                 paras[i] = _force_page_break_before(para)
                 n_week += 1
+            paras[i] = _add_keep_next(paras[i])
             continue
         # 图1引导句：清掉硬分页，并连带清掉后续图段/图注的段前分页
         if not overview_done and any(k in text for k in overview_keys):
@@ -331,6 +335,8 @@ def apply_month_fixed_pages(docx_path: str) -> Dict[str, int]:
             n_advice += 1
         if force:
             paras[i] = _force_page_break_before(para)
+    paras = _clear_breaks_inside_weeks(paras, week_re)
+    paras = _fit_week_chart_extents(paras, week_re)
     new_doc = _PARA_RE.sub(lambda m, it=iter(paras): next(it), doc_xml, count=len(paras))
     parts["word/document.xml"] = new_doc.encode("utf-8")
     _write_zip(parts, path)
@@ -368,6 +374,156 @@ def _clear_page_break_before(para: str) -> str:
         return para
     ppr = _strip_ppr_child(m.group(0), "pageBreakBefore")
     return para[:m.start()] + ppr + para[m.end():]
+
+
+def _add_keep_next(para: str) -> str:
+    """标题与下一段留在同一页。"""
+    para = _ensure_ppr(para)
+    if re.search(r"<w:keepNext\b", para):
+        return para
+    return re.sub(
+        r"<w:pPr(?:\s[^>]*)?>",
+        lambda m: m.group(0) + "<w:keepNext/>",
+        para, count=1)
+
+
+_NOTE_PARA_RE = re.compile(r"^\s*注\s*[:：]")
+_CONT_TABLE_RE = re.compile(r"^[（(]?\s*续表\s*[）)]?$")
+# 月报模板版心高（A4 减上下边距），用于把一周两张图收进同一页
+_MONTH_USABLE_H_PT = 630.0
+_BODY_LINE_PT = 29.0
+_CHARS_PER_LINE = 26
+
+
+def _drop_month_blank_paragraphs(paras: List[str]) -> List[str]:
+    """去掉周标题前和周块内部的空段，避免一周一页时留下大块空白。
+
+    用空串占位，保持与 document.xml 段落条数一致，方便整段替换。
+    """
+    week_re = re.compile(r"^[1-5]\..*第[1-5]周")
+    out = list(paras)
+    for i, para in enumerate(paras):
+        text = _para_text(para).strip()
+        has_draw = bool(_DRAW_RE.search(para))
+        if text or has_draw:
+            continue
+        nxt = ""
+        for j in range(i + 1, len(paras)):
+            if out[j] == "":
+                continue
+            nt = _para_text(paras[j]).strip()
+            if nt or _DRAW_RE.search(paras[j]):
+                nxt = nt
+                break
+        if week_re.match(nxt):
+            out[i] = ""
+            continue
+        prev = ""
+        for k in range(i - 1, -1, -1):
+            if out[k] == "":
+                continue
+            pt = _para_text(paras[k]).strip()
+            if pt or _DRAW_RE.search(paras[k]):
+                prev = pt
+                break
+        if week_re.match(prev):
+            out[i] = ""
+    return out
+
+
+def _clear_breaks_inside_weeks(paras: List[str], week_re: re.Pattern) -> List[str]:
+    """周标题之后到下一周/建议章之前，清掉段前分页，标题和图表留在同一页。"""
+    in_week = False
+    for i, para in enumerate(paras):
+        text = _para_text(para).strip()
+        if week_re.match(text):
+            in_week = True
+            continue
+        if in_week and (text.startswith("三、") or text.startswith("四、")):
+            in_week = False
+        if in_week:
+            paras[i] = _clear_page_break_before(para)
+            if text.startswith("（") and len(text) <= 20:
+                paras[i] = _add_keep_next(paras[i])
+    return paras
+
+
+def _estimate_text_height(text: str) -> float:
+    if not text:
+        return 0.0
+    if text.startswith("图") and len(text) <= 40:
+        return 22.0
+    lines = max(1, (len(text) + _CHARS_PER_LINE - 1) // _CHARS_PER_LINE)
+    return lines * _BODY_LINE_PT
+
+
+def _set_drawing_height(para: str, height_pt: float) -> str:
+    cy = str(int(round(height_pt * EMU_PER_PT)))
+    para = re.sub(
+        r'(<wp:extent\b[^>]*\bcy=")(\d+)(")',
+        lambda m: f"{m.group(1)}{cy}{m.group(3)}",
+        para, count=1)
+    return re.sub(
+        r'(<a:ext\b[^>]*\bcy=")(\d+)(")',
+        lambda m: f"{m.group(1)}{cy}{m.group(3)}",
+        para, count=1)
+
+
+def _fit_week_chart_extents(paras: List[str], week_re: re.Pattern) -> List[str]:
+    """按一周剩余版心把该周图等高放大，两图加标题评述尽量占满一页。"""
+    indexes = [i for i, para in enumerate(paras) if week_re.match(_para_text(para).strip())]
+    if not indexes:
+        return paras
+    bounds = indexes + [len(paras)]
+    for start, end in zip(indexes, bounds[1:]):
+        block_end = end
+        for j in range(start + 1, end):
+            text = _para_text(paras[j]).strip()
+            if text.startswith("三、") or text.startswith("四、"):
+                block_end = j
+                break
+        fig_idx = [j for j in range(start, block_end) if _DRAW_RE.search(paras[j])]
+        if not fig_idx:
+            continue
+        text_h = 0.0
+        for j in range(start, block_end):
+            if j in fig_idx:
+                continue
+            text_h += _estimate_text_height(_para_text(paras[j]).strip())
+        remain = _MONTH_USABLE_H_PT - text_h - 16.0
+        height = remain / len(fig_idx)
+        # 下限放低，长评述周也能把两张图和标题留在同一页
+        height = max(80.0, min(H_WEEK_MAX, height))
+        for j in fig_idx:
+            paras[j] = _set_drawing_height(paras[j], height)
+    return paras
+
+
+def strip_note_paragraphs_xml(xml: str) -> str:
+    """删掉独立成段的「注：…」和「续表」，不改普通正文里的字。"""
+
+    def _keep(match: re.Match) -> str:
+        para = match.group(0)
+        text = _para_text(para).strip()
+        if _NOTE_PARA_RE.match(text) or _CONT_TABLE_RE.match(text):
+            return ""
+        return para
+
+    return _PARA_RE.sub(_keep, xml)
+
+
+def strip_notes_in_docx(docx_path: str) -> int:
+    """从成品 docx 正文去掉注段和续表标记。返回删除段数。"""
+    path = os.path.abspath(docx_path)
+    with zipfile.ZipFile(path, "r") as zin:
+        parts = {name: zin.read(name) for name in zin.namelist()}
+    xml = parts["word/document.xml"].decode("utf-8")
+    new_xml = strip_note_paragraphs_xml(xml)
+    removed = xml.count("<w:p") - new_xml.count("<w:p")
+    if new_xml != xml:
+        parts["word/document.xml"] = new_xml.encode("utf-8")
+        _write_zip(parts, path)
+    return max(removed, 0)
 
 
 def _max_int(found: List[str]) -> int:
@@ -710,6 +866,31 @@ def _tx_pr(rot: int = 0, sz: str = CHART_SZ) -> str:
     )
 
 
+def _val_axis_title(unit: str) -> str:
+    """纵轴单位标题：横排贴在数值轴上，不用 manualLayout 挪开，overlay=0 不压进绘图区。
+
+    catAx / valAx 都写 crosses=min，两轴在最小值处交于同一原点。
+    """
+    text = escape(unit)
+    return (
+        "<c:title><c:tx><c:rich>"
+        '<a:bodyPr rot="0" spcFirstLastPara="0" anchor="ctr"/>'
+        "<a:lstStyle/><a:p><a:pPr>"
+        f"{_ea_font()}"
+        "</a:pPr>"
+        f'<a:r><a:rPr lang="zh-CN" altLang="en-US" sz="{CHART_SZ}">'
+        f'<a:latin typeface="{CHART_FONT}"/>'
+        f'<a:ea typeface="{CHART_FONT}"/>'
+        "</a:rPr>"
+        f"<a:t>{text}</a:t></a:r>"
+        f'<a:endParaRPr lang="zh-CN" sz="{CHART_SZ}"/>'
+        "</a:p></c:rich></c:tx>"
+        "<c:layout/>"
+        '<c:overlay val="0"/>'
+        "</c:title>"
+    )
+
+
 def _wrap_cat_label(lab: str, n_cats: int) -> str:
     """分类轴标签：横排、不换行；类多时适度截断（与承载力图观感接近）。"""
     s = str(lab).replace("\n", "").replace("\\n", "").strip()
@@ -780,12 +961,7 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         f"{no_box}"
         '<c:chart><c:autoTitleDeleted val="1"/>'
         f'<c:plotArea>{no_box}'
-        '<c:layout><c:manualLayout>'
-        '<c:layoutTarget val="inner"/>'
-        '<c:xMode val="edge"/><c:yMode val="edge"/>'
-        '<c:x val="0.10"/><c:y val="0.06"/>'
-        '<c:w val="0.86"/><c:h val="0.78"/>'
-        '</c:manualLayout></c:layout>'
+        '<c:layout/>'
         f'<c:barChart><c:barDir val="{bar_dir}"/><c:grouping val="clustered"/>'
         '<c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/>'
         "<c:tx><c:v></c:v></c:tx>"
@@ -821,7 +997,7 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         "<c:majorGridlines>"
         '<c:spPr><a:ln w="6350"><a:solidFill><a:srgbClr val="D8DEE8"/>'
         "</a:solidFill></a:ln></c:spPr></c:majorGridlines>"
-        # 无轴标题：避免「项/%」被 Word 拧成倾斜竖字
+        f"{_val_axis_title('%' if spec.pct else '项')}"
         f'<c:numFmt formatCode="{ax_fmt}" sourceLinked="0"/>'
         f"{_tx_pr(0)}"
         "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/>"
@@ -889,28 +1065,24 @@ WEEK_TEXT_RESERVE_PT = 110.0
 _WEEK_TITLE_RE = re.compile(r"^[1-5]\.\d+月份第[1-5]周")
 
 
+def two_char_col_widths(n_cols: int, font_pt: float, text_w: float) -> List[float]:
+    """每列约两个汉字宽（字号即字宽），多余字在格内换行。
+
+    列总宽超过版心时等比收进，仍然只保留一张表，不拆续表。
+    """
+    n = max(int(n_cols), 1)
+    cell = max(float(font_pt), 10.5) * 2.0 + 2.0
+    widths = [cell] * n
+    total = cell * n
+    if text_w > 0 and total > text_w:
+        scale = text_w / total
+        widths = [w * scale for w in widths]
+    return widths
+
+
 def detail_col_widths(headers: List[str], text_w: float) -> List[float]:
-    """明细表列宽：语义配方后等比拉满版心（居中后左右不露白）。"""
-    prefs: List[float] = []
-    for h in headers:
-        width = DETAIL_COL_DEFAULT
-        for key, w in DETAIL_COL_PREF.items():
-            if key in h:
-                width = w
-                break
-        prefs.append(width)
-    total = sum(prefs) or 1.0
-    if abs(total - text_w) > 0.5:
-        prefs = [w * text_w / total for w in prefs]
-    # 四字单位名（变电检修）在缩放后仍要单行放下
-    for i, h in enumerate(headers):
-        if "单位" in h and prefs[i] < 72.0:
-            need = 72.0 - prefs[i]
-            prefs[i] = 72.0
-            donor = max(range(len(prefs)), key=lambda j: prefs[j])
-            if donor != i:
-                prefs[donor] = max(36.0, prefs[donor] - need)
-    return prefs
+    """明细表列宽：每列两个汉字，长文本在单元格内自动换行。"""
+    return two_char_col_widths(len(headers), DETAIL_FONT_PT, text_w)
 
 
 def chart_height_pt(n_cats: int, *, kind: str) -> float:
@@ -1293,8 +1465,8 @@ def manage_period_mean(data_path: str, lo: str, hi: str) -> List[Tuple[str, floa
     import datetime
     from capacity.calculator import period_manage_caps_from_days
 
-    with open(data_path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    from pngCharts import load_calc_json
+    data = load_calc_json(data_path)
     days = (data.get("management") or {}).get("days") or {}
     caps = period_manage_caps_from_days(
         days, datetime.date.fromisoformat(lo), datetime.date.fromisoformat(hi))
@@ -1523,7 +1695,17 @@ def _ensure_docx(src: str, dest: str) -> None:
         if src != dest:
             shutil.copy2(src, dest)
         return
-    _doc_to_docx(src, dest)
+    try:
+        from fillReport import word_com_available
+        if word_com_available():
+            _doc_to_docx(src, dest)
+            return
+    except Exception:
+        pass
+    from fillReportLinux import doc_to_docx_cached
+    produced = doc_to_docx_cached(src)
+    if os.path.abspath(produced) != dest:
+        shutil.copy2(produced, dest)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1584,6 +1766,7 @@ def native_main(argv: Optional[List[str]] = None) -> int:
                 args.lo, args.hi)
         stats = inject_office_charts(args.out, specs, args.out)
         stats["skipped"] = int(stats.get("skipped") or 0) + skipped
+        stats["notes_removed"] = strip_notes_in_docx(args.out)
         page_info = {}
         if args.kind == "month":
             page_info = apply_month_fixed_pages(args.out)

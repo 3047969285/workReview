@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from capacity.config import (CONFIG_SECTION_INPUT, DEFAULT_INPUT_CONFIG,
                              apply_formula_config, load_config)
@@ -112,10 +112,27 @@ def bar_color(v: float) -> str:
     return C_MAIN
 
 
+_CALC_JSON_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+def load_calc_json(data_path: str) -> Dict[str, Any]:
+    """读取 calc 结果 JSON，同进程按修改时间缓存，月报多图不再反复解析。"""
+    key = os.path.abspath(data_path)
+    mtime = os.path.getmtime(key)
+    hit = _CALC_JSON_CACHE.get(key)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    with open(key, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("calc 结果 JSON 顶层必须是对象")
+    _CALC_JSON_CACHE[key] = (mtime, data)
+    return data
+
+
 def load_matrix(data_path: str) -> Dict[str, Dict[str, Dict]]:
     """读取 calcCapacity 输出 JSON 的 matrix：{date: {unit: {承载力, 预警}}}。"""
-    with open(data_path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    data = load_calc_json(data_path)
     matrix = data.get("matrix")
     if not matrix:
         raise ValueError("data 中无 matrix（需组织架构映射.是否启用=true 后重跑）")
@@ -179,7 +196,7 @@ def render_capacity_chart(data: List[Tuple[str, float]], out_path: str,
         data, out_path, label, "%",
         value_fmt=lambda v: f"{int(round(v))}", ref_lines=(75, 90),
         pct_axis=True,
-        note=note or "注：承载力=Σ自然日日承载力÷工作日天数；>100 表示超满负荷。")
+        note=note or "")
 
 
 def _ptype_colors(n: int) -> List[str]:
@@ -200,7 +217,7 @@ def render_ptype_chart(data: List[Tuple[str, int]], out_path: str,
         data, out_path, label, "项",
         value_fmt=lambda v: f"{int(v)}",
         colors=colors, over_threshold=None,
-        note="注：按作业类型统计区间内日计划项数。")
+        note="")
 
 
 def _wrap_tick(s: str, n_cats: int) -> str:
@@ -287,7 +304,7 @@ def render_manage_chart(data_path: str, lo: str, hi: str, label: str,
         rows, out_path, title, "%",
         value_fmt=lambda v: f"{int(round(v))}", ref_lines=(75, 90),
         pct_axis=True,
-        note="注：F_管理=Σ自然日实需人天÷(在册人数×工作日天数)。")
+        note="")
 
 
 def build_parser() -> argparse.ArgumentParser:

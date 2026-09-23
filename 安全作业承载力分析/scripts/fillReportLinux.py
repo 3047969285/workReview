@@ -5,7 +5,7 @@
   - replace：段落与单元格全文子串替换（长键优先）
   - paragraph_replace：anchor + occurrence，可选 next_paragraph 整段覆盖
   - tables：按列名或 anchor 定位，覆盖表头、删示例行、写入数据行
-  - 矩阵表 max_units_per_table 纵切，块间插入「（续表）」
+  - 矩阵表整表写入，列宽约两个汉字，格内换行，不拆续表
   - 空明细表删除
   - trim_month_weeks
   - 日/周：替换模板承载力图位，并在引导句/评述句后插入作业类型图与管理承载力图
@@ -19,7 +19,6 @@ import argparse
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from copy import deepcopy
@@ -34,7 +33,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from capacity.office_chart import (
-    DETAIL_FONT_PT, DETAIL_LINE_PT, TEXT_WIDTH_FALLBACK_PT, detail_col_widths)
+    DETAIL_FONT_PT, DETAIL_LINE_PT, TEXT_WIDTH_FALLBACK_PT, two_char_col_widths)
 from fillReport import TEMPLATES
 
 LOGGER = logging.getLogger("fillReportLinux")
@@ -50,7 +49,9 @@ _PTYPE_ANCHOR = "各作业类型日计划数量如下图所示"
 _CHART_W_PT = 435.0
 _MAX_H_PT = 240.0
 _MATRIX_FONT_PT = 12.0
-_MATRIX_FIRST_PT = 60.0
+_NOTE_PARA_RE = re.compile(r"^\s*注\s*[:：]")
+_CONT_TABLE_RE = re.compile(r"^[（(]?\s*续表\s*[）)]?$")
+_DOCX_CACHE: Dict[str, Tuple[float, str]] = {}
 
 
 def _substitute(text: str, mapping: Dict[str, str]) -> str:
@@ -356,6 +357,23 @@ def _set_widths(table: Table, widths_pt: Sequence[float]) -> None:
         tblpr.append(tblw)
     tblw.set(qn("w:w"), str(int(total * 20)))
     tblw.set(qn("w:type"), "dxa")
+    layout = tblpr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tblpr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+    # 左右边距收到 1pt，两个汉字的列宽才放得下两个字，多出来的再换行
+    mar = tblpr.find(qn("w:tblCellMar"))
+    if mar is None:
+        mar = OxmlElement("w:tblCellMar")
+        tblpr.append(mar)
+    for edge, twips in (("top", "0"), ("left", "20"), ("bottom", "0"), ("right", "20")):
+        node = mar.find(qn(f"w:{edge}"))
+        if node is None:
+            node = OxmlElement(f"w:{edge}")
+            mar.append(node)
+        node.set(qn("w:w"), twips)
+        node.set(qn("w:type"), "dxa")
     jc = tblpr.find(qn("w:jc"))
     if jc is None:
         jc = OxmlElement("w:jc")
@@ -418,52 +436,8 @@ def _fill_one_table(doc: Document, table: Table, columns: List[str],
                 _set_cell_text(cells[index], value, font, size, False, line)
     if is_detail:
         _mark_header_row(table)
-        widths = detail_col_widths(columns, _text_width_pt(doc))
-    else:
-        text_w = _text_width_pt(doc)
-        unit_n = max(1, len(columns) - 1)
-        unit_w = (text_w - _MATRIX_FIRST_PT) / unit_n
-        widths = [_MATRIX_FIRST_PT] + [unit_w] * unit_n
+    widths = two_char_col_widths(len(columns), size, _text_width_pt(doc))
     _set_widths(table, widths)
-
-
-def _insert_after(element, new_elm) -> None:
-    element.addnext(new_elm)
-
-
-def _caption_paragraph(text: str) -> Any:
-    paragraph = OxmlElement("w:p")
-    ppr = OxmlElement("w:pPr")
-    jc = OxmlElement("w:jc")
-    jc.set(qn("w:val"), "center")
-    ppr.append(jc)
-    paragraph.append(ppr)
-    run = OxmlElement("w:r")
-    rpr = OxmlElement("w:rPr")
-    rfonts = OxmlElement("w:rFonts")
-    for attr in ("w:ascii", "w:hAnsi", "w:eastAsia"):
-        rfonts.set(qn(attr), "宋体")
-    rpr.append(rfonts)
-    sz = OxmlElement("w:sz")
-    sz.set(qn("w:val"), "21")
-    rpr.append(sz)
-    run.append(rpr)
-    t = OxmlElement("w:t")
-    t.text = text
-    run.append(t)
-    paragraph.append(run)
-    return paragraph
-
-
-def _append_matrix_block(doc: Document, prev: Table, proto: Any,
-                         columns: List[str], rows: List[List[Any]]) -> Table:
-    mark = _caption_paragraph("（续表）")
-    _insert_after(prev._tbl, mark)
-    cloned = deepcopy(proto)
-    _insert_after(mark, cloned)
-    table = Table(cloned, doc)
-    _fill_one_table(doc, table, columns, rows)
-    return table
 
 
 def _remove_table(table: Table) -> None:
@@ -484,32 +458,7 @@ def fill_tables(doc: Document, specs: Sequence[Dict[str, Any]]) -> None:
         if not rows:
             _remove_table(target)
             continue
-        max_units = spec.get("max_units_per_table")
-        if max_units is not None and len(columns) - 1 > int(max_units):
-            proto = deepcopy(target._tbl)
-            units = columns[1:]
-            limit = int(max_units)
-            count = -(-len(units) // limit)
-            base, rem = divmod(len(units), count)
-            blocks = []
-            cursor = 0
-            for index in range(count):
-                size = base + (1 if index < rem else 0)
-                blocks.append(units[cursor:cursor + size])
-                cursor += size
-            prev = target
-            start = 0
-            for bi, block in enumerate(blocks):
-                blk_cols = [columns[0]] + block
-                blk_rows = [[row[0]] + row[1 + start:1 + start + len(block)] for row in rows]
-                if bi == 0:
-                    _fill_one_table(doc, target, blk_cols, blk_rows)
-                    prev = target
-                else:
-                    prev = _append_matrix_block(doc, prev, proto, blk_cols, blk_rows)
-                start += len(block)
-        else:
-            _fill_one_table(doc, target, columns, rows)
+        _fill_one_table(doc, target, columns, rows)
 
 
 def trim_month_weeks(doc: Document, keep_weeks: int) -> None:
@@ -658,6 +607,19 @@ def apply_charts(doc: Document, report: str, cap_dir: str) -> int:
     return count
 
 
+def strip_note_paragraphs(doc: Document) -> int:
+    """删除独立成段的「注：」和「续表」。正文里偶然出现的「注」字不删。"""
+    removed = 0
+    for paragraph in list(doc.paragraphs):
+        text = paragraph.text.strip()
+        if _NOTE_PARA_RE.match(text) or _CONT_TABLE_RE.match(text):
+            parent = paragraph._element.getparent()
+            if parent is not None:
+                parent.remove(paragraph._element)
+                removed += 1
+    return removed
+
+
 def render(template_docx: str, params: Dict[str, Any], out_path: str,
            report: str, charts_dir: Optional[str]) -> int:
     doc = Document(template_docx)
@@ -668,6 +630,7 @@ def render(template_docx: str, params: Dict[str, Any], out_path: str,
     keep = params.get("trim_month_weeks")
     if keep is not None:
         trim_month_weeks(doc, int(keep))
+    strip_note_paragraphs(doc)
     charts = 0
     if charts_dir:
         charts = apply_charts(doc, report, charts_dir)
@@ -675,6 +638,27 @@ def render(template_docx: str, params: Dict[str, Any], out_path: str,
     doc.save(out_path)
     LOGGER.info("已生成 %s（图 %d 张）", out_path, charts)
     return charts
+
+
+def doc_to_docx_cached(doc_path: str) -> str:
+    """把 .doc 转成 .docx 并按源文件修改时间缓存，日/周/月不重复启动 LibreOffice。"""
+    key = os.path.abspath(doc_path)
+    if key.lower().endswith(".docx"):
+        return key
+    mtime = os.path.getmtime(key)
+    hit = _DOCX_CACHE.get(key)
+    if hit is not None and hit[0] == mtime and os.path.isfile(hit[1]):
+        return hit[1]
+    cache_dir = os.path.join(tempfile.gettempdir(), "cap-tpl-docx")
+    produced = convert_doc_to_docx(key, cache_dir)
+    _DOCX_CACHE[key] = (mtime, produced)
+    return produced
+
+
+def fill_docx(template_doc_path: str, params: Dict[str, Any], out_path: str) -> None:
+    """无 Word COM 时的模板填充。图表由 nativeCharts 再写入 DrawingML。"""
+    docx_template = doc_to_docx_cached(template_doc_path)
+    render(docx_template, params, out_path, report="day", charts_dir=None)
 
 
 def convert_doc_to_docx(doc_path: str, out_dir: str) -> str:
@@ -716,12 +700,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             os.path.dirname(__file__), "..", "templates"))
         doc_name = TEMPLATES[args.template]
         doc_path = os.path.join(skill_templates, doc_name)
-        work = tempfile.mkdtemp(prefix="cap-docx-")
-        try:
-            docx_template = convert_doc_to_docx(doc_path, work)
-            render(docx_template, params, args.out, args.report, args.charts)
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
+        docx_template = doc_to_docx_cached(doc_path)
+        render(docx_template, params, args.out, args.report, args.charts)
     else:
         render(docx_template, params, args.out, args.report, args.charts)
     print(json.dumps({"ok": True, "out": os.path.abspath(args.out)}, ensure_ascii=False))

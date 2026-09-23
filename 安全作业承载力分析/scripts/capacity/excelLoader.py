@@ -8,6 +8,7 @@ Excel 数据源加载（excelLoader：.xls / .xlsm / .xlsx -> WorkDataset）
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,22 @@ from .constants import (InputDataError, FileAccessError, FileContentError)
 from .config import _cfg_get, DEFAULT_INPUT_CONFIG
 from .parsing import _rows_to_plans, build_dataset
 from .models import WorkDataset
+
+# 同一进程内按文件修改时间 + 读取参数复用解析结果，避免日/周/月重复打开工作簿。
+_DATASET_CACHE: Dict[tuple, WorkDataset] = {}
+_DATASET_BY_FILE: Dict[tuple, WorkDataset] = {}
+_SHEET_CACHE: Dict[tuple, List[Dict[str, Any]]] = {}
+_PERSON_CACHE: Dict[tuple, List[Dict[str, Any]]] = {}
+
+
+def _cache_key(path: str, *parts: Any) -> tuple:
+    abs_path = os.path.abspath(path)
+    try:
+        mtime = os.path.getmtime(abs_path)
+    except OSError:
+        mtime = 0
+    blob = json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str)
+    return (abs_path, mtime, blob)
 
 
 def _sheet_nrows(sh: Any) -> int:
@@ -169,6 +186,9 @@ def read_sheet_rows(path: str, sheet_name: str, header_row: int = 0,
     """
     if data_start is None:
         data_start = header_row + 1
+    key = _cache_key(path, sheet_name, header_row, data_start, required)
+    if key in _SHEET_CACHE:
+        return _SHEET_CACHE[key]
     wb, kind = _open_workbook(path)
     try:
         names = wb.sheet_names() if hasattr(wb, "sheet_names") else list(wb.sheetnames)
@@ -176,9 +196,12 @@ def read_sheet_rows(path: str, sheet_name: str, header_row: int = 0,
             if required:
                 raise InputDataError(f"工作表「{sheet_name}」不存在，可选：{names}",
                                      {"sheets": names, "want": sheet_name})
+            _SHEET_CACHE[key] = []
             return []
         sh = wb.sheet_by_name(sheet_name) if hasattr(wb, "sheet_by_name") else wb[sheet_name]
-        return _xls_rowdicts(sh, header_row, data_start)
+        rows = _xls_rowdicts(sh, header_row, data_start)
+        _SHEET_CACHE[key] = rows
+        return rows
     finally:
         if kind == "xlsx":
             try:
@@ -195,9 +218,14 @@ def read_xls_persons(path: str, input_cfg: Dict[str, Any]) -> List[Dict[str, Any
     """
     if not os.path.exists(path):
         raise FileAccessError(f"输入文件不存在：{path}", path)
+    key = _cache_key(path, input_cfg)
+    if key in _PERSON_CACHE:
+        return _PERSON_CACHE[key]
     wb, kind = _open_workbook(path)
     try:
-        return _build_xls_persons(wb, input_cfg)
+        persons = _build_xls_persons(wb, input_cfg)
+        _PERSON_CACHE[key] = persons
+        return persons
     finally:
         if kind == "xlsx":
             try:
@@ -213,10 +241,23 @@ def read_xls_dataset(path: str, input_cfg: Optional[Dict[str, Any]] = None) -> W
     if os.path.isdir(path):
         raise FileAccessError(f"输入路径是目录而非文件：{path}", path)
     input_cfg = input_cfg or DEFAULT_INPUT_CONFIG
+    try:
+        file_key = (os.path.abspath(path), os.path.getmtime(path))
+    except OSError:
+        file_key = (os.path.abspath(path), 0)
+    # 同一工作簿在本进程里只解析一次。日/周/月和作业类型图共用这次结果。
+    if file_key in _DATASET_BY_FILE:
+        return _DATASET_BY_FILE[file_key]
+    key = _cache_key(path, input_cfg)
+    if key in _DATASET_CACHE:
+        return _DATASET_CACHE[key]
 
     wb, kind = _open_workbook(path)
     try:
-        return _parse_workbook(wb, input_cfg, path, f"Excel(.{kind})")
+        dataset = _parse_workbook(wb, input_cfg, path, f"Excel(.{kind})")
+        _DATASET_CACHE[key] = dataset
+        _DATASET_BY_FILE[file_key] = dataset
+        return dataset
     finally:
         if kind == "xlsx":
             try:
