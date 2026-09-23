@@ -63,12 +63,41 @@ CHART_FS = 12.0  # 小四
 
 
 def _setup_font() -> None:
-    """注册中文字体（宋体优先，图内小四）。"""
+    """注册中文字体（宋体优先，图内小四）。
+
+    Windows 有 SimSun 时用宋体。Linux 无宋体时回退 Noto Serif CJK SC
+    （fonts-noto-cjk）或文泉驿正黑，避免中文变方框。
+    """
+    cands = ("SimSun", "NSimSun", "宋体", "Microsoft YaHei",
+             "Noto Serif CJK SC", "Noto Sans CJK SC",
+             "WenQuanYi Zen Hei", "WenQuanYi Micro Hei")
+    global FONT_NAME
+    for path in (
+            "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"):
+        if os.path.isfile(path):
+            try:
+                font_manager.fontManager.addfont(path)
+            except Exception:
+                pass
     names = {f.name for f in font_manager.fontManager.ttflist}
-    for cand in ("SimSun", "NSimSun", "宋体", "Microsoft YaHei"):
+    chosen = None
+    for cand in cands:
         if cand in names:
-            plt.rcParams["font.family"] = cand
+            chosen = cand
             break
+    if chosen is None:
+        for path in (
+                "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"):
+            if os.path.isfile(path):
+                font_manager.fontManager.addfont(path)
+                chosen = font_manager.FontProperties(fname=path).get_name()
+                break
+    if chosen:
+        FONT_NAME = chosen
+        plt.rcParams["font.family"] = chosen
     plt.rcParams["axes.unicode_minus"] = False
     plt.rcParams["font.size"] = CHART_FS
 
