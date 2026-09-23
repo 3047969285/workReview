@@ -35,7 +35,8 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from capacity.office_chart import (
-    DETAIL_FONT_PT, DETAIL_LINE_PT, TEXT_WIDTH_FALLBACK_PT, two_char_col_widths)
+    DETAIL_FONT_PT, DETAIL_LINE_PT, TEXT_WIDTH_FALLBACK_PT,
+    two_char_col_widths, wrap_table_cell_text)
 from fillReport import TEMPLATES
 
 LOGGER = logging.getLogger("fillReportLinux")
@@ -266,9 +267,28 @@ def _set_run_font(run, name: str, size_pt: float, bold: bool) -> None:
         rfonts.set(qn(attr), name)
 
 
+def _ensure_cell_borders(cell) -> None:
+    """明细/矩阵表统一细黑边框，避免只剩表头线、正文漂浮。"""
+    tcpr = cell._tc.get_or_add_tcPr()
+    borders = tcpr.find(qn("w:tcBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tcBorders")
+        tcpr.append(borders)
+    for edge in ("top", "left", "bottom", "right"):
+        node = borders.find(qn(f"w:{edge}"))
+        if node is None:
+            node = OxmlElement(f"w:{edge}")
+            borders.append(node)
+        node.set(qn("w:val"), "single")
+        node.set(qn("w:sz"), "4")
+        node.set(qn("w:space"), "0")
+        node.set(qn("w:color"), "000000")
+
+
 def _set_cell_text(cell, value: Any, font: str, size_pt: float, bold: bool,
                    line_pt: Optional[float]) -> None:
-    text = "" if value is None else str(value)
+    # 两字一行：先按规则插入 \\v，再按 \\v 拆成软换行
+    text = wrap_table_cell_text(value)
     paragraph = cell.paragraphs[0]
     for extra in cell.paragraphs[1:]:
         parent = extra._element.getparent()
@@ -307,6 +327,7 @@ def _set_cell_text(cell, value: Any, font: str, size_pt: float, bold: bool,
         v_align = OxmlElement("w:vAlign")
         tcpr.append(v_align)
     v_align.set(qn("w:val"), "center")
+    _ensure_cell_borders(cell)
 
 
 def _grid_cols(table: Table):

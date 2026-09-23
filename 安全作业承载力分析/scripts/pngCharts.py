@@ -221,12 +221,12 @@ def render_ptype_chart(data: List[Tuple[str, int]], out_path: str,
 
 
 def _wrap_tick(s: str, n_cats: int) -> str:
-    """分类轴标签：类多按 2 字换行，禁止倾斜。"""
-    text = str(s)
-    width = 2 if n_cats >= 10 else (3 if n_cats >= 6 else 8)
-    if len(text) <= width:
+    """分类轴标签：一字一行（与 native DrawingML 一致），禁止截断/倾斜。"""
+    del n_cats
+    text = str(s).replace("\n", "").strip()
+    if not text:
         return text
-    return "\n".join(text[i:i + width] for i in range(0, len(text), width))
+    return "\n".join(list(text))
 
 
 def _render_vbar_chart(data: List[Tuple[str, float]], out_path: str,
