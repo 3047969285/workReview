@@ -23,6 +23,8 @@ _DATASET_CACHE: Dict[tuple, WorkDataset] = {}
 _DATASET_BY_FILE: Dict[tuple, WorkDataset] = {}
 _SHEET_CACHE: Dict[tuple, List[Dict[str, Any]]] = {}
 _PERSON_CACHE: Dict[tuple, List[Dict[str, Any]]] = {}
+# xlrd 打开 .xls 会把全部工作表解析一遍。数据集和组织架构表共用这一本，不再开第二次。
+_WB_CACHE: Dict[tuple, Tuple[Any, str]] = {}
 
 
 def _cache_key(path: str, *parts: Any) -> tuple:
@@ -151,6 +153,34 @@ def _parse_workbook(wb: Any, input_cfg: Dict[str, Any], path: str,
     return build_dataset({"plans": plans, "persons": persons, "absence": []})
 
 
+def _workbook_key(path: str) -> tuple:
+    abs_path = os.path.abspath(path)
+    try:
+        mtime = os.path.getmtime(abs_path)
+    except OSError:
+        mtime = 0
+    return (abs_path, mtime)
+
+
+def _acquire_workbook(path: str) -> Tuple[Any, str, bool]:
+    """打开工作簿。返回 (wb, 引擎名, 调用方是否负责 close)。
+
+    .xls/.xlsm 用 xlrd，整本解析很贵，按路径和修改时间留在进程里给后续表复用。
+    .xlsx 的 read_only 工作簿不跨调用复用，调用方用完要 close。
+    """
+    ext = os.path.splitext(str(path).lower())[1]
+    if ext == ".xlsx":
+        wb, kind = _open_workbook(path)
+        return wb, kind, True
+    key = _workbook_key(path)
+    hit = _WB_CACHE.get(key)
+    if hit is not None:
+        return hit[0], hit[1], False
+    wb, kind = _open_workbook(path)
+    _WB_CACHE[key] = (wb, kind)
+    return wb, kind, False
+
+
 def _open_workbook(path: str) -> Tuple[Any, str]:
     """跨引擎打开工作簿并返回 (wb, 引擎名："xlsx"/"xls")；.xlsx 会话须调用方 close。"""
     ext = os.path.splitext(str(path).lower())[1]
@@ -189,7 +219,7 @@ def read_sheet_rows(path: str, sheet_name: str, header_row: int = 0,
     key = _cache_key(path, sheet_name, header_row, data_start, required)
     if key in _SHEET_CACHE:
         return _SHEET_CACHE[key]
-    wb, kind = _open_workbook(path)
+    wb, kind, owned = _acquire_workbook(path)
     try:
         names = wb.sheet_names() if hasattr(wb, "sheet_names") else list(wb.sheetnames)
         if sheet_name not in names:
@@ -203,7 +233,7 @@ def read_sheet_rows(path: str, sheet_name: str, header_row: int = 0,
         _SHEET_CACHE[key] = rows
         return rows
     finally:
-        if kind == "xlsx":
+        if owned:
             try:
                 wb.close()
             except Exception:
@@ -221,13 +251,13 @@ def read_xls_persons(path: str, input_cfg: Dict[str, Any]) -> List[Dict[str, Any
     key = _cache_key(path, input_cfg)
     if key in _PERSON_CACHE:
         return _PERSON_CACHE[key]
-    wb, kind = _open_workbook(path)
+    wb, kind, owned = _acquire_workbook(path)
     try:
         persons = _build_xls_persons(wb, input_cfg)
         _PERSON_CACHE[key] = persons
         return persons
     finally:
-        if kind == "xlsx":
+        if owned:
             try:
                 wb.close()
             except Exception:
@@ -252,14 +282,14 @@ def read_xls_dataset(path: str, input_cfg: Optional[Dict[str, Any]] = None) -> W
     if key in _DATASET_CACHE:
         return _DATASET_CACHE[key]
 
-    wb, kind = _open_workbook(path)
+    wb, kind, owned = _acquire_workbook(path)
     try:
         dataset = _parse_workbook(wb, input_cfg, path, f"Excel(.{kind})")
         _DATASET_CACHE[key] = dataset
         _DATASET_BY_FILE[file_key] = dataset
         return dataset
     finally:
-        if kind == "xlsx":
+        if owned:
             try:
                 wb.close()
             except Exception:

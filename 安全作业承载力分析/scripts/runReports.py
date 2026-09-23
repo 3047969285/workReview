@@ -454,6 +454,48 @@ def _setup_logging() -> None:
                         format="[%(levelname)s] %(message)s")
 
 
+def _begin_template_prefetch(templates: List[str]):
+    """无 Word 时并行把日/周/月 .doc 转成 docx，和后面的计算叠在一起跑。
+
+    返回 (pool, futures)。调用方必须 _finish_template_prefetch，避免线程残留。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        import fillReport as fr
+        if fr.word_com_available():
+            return None, []
+        from fillReportLinux import doc_to_docx_cached
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("模板预转换未启动：%s", exc)
+        return None, []
+    paths: List[str] = []
+    for tpl in templates:
+        name = fr.TEMPLATES.get(tpl)
+        if not name:
+            continue
+        path = os.path.join(fr.TEMPLATES_DIR, name)
+        if os.path.isfile(path) and not path.lower().endswith(".docx"):
+            paths.append(path)
+    if not paths:
+        return None, []
+    pool = ThreadPoolExecutor(max_workers=min(3, len(paths)))
+    futures = [pool.submit(doc_to_docx_cached, path) for path in paths]
+    return pool, futures
+
+
+def _finish_template_prefetch(pool, futures) -> None:
+    if pool is None and not futures:
+        return
+    for fut in futures or []:
+        try:
+            fut.result()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("模板预转换未完成，填充时会再试：%s", exc)
+    if pool is not None:
+        pool.shutdown(wait=True)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_main_parser().parse_args(argv)
     _setup_logging()
@@ -584,6 +626,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     except OSError as exc:
         return _fail("OUTPUT_WRITE_FAILED", f"创建输出目录失败：{exc}", EXIT_IO)
 
+    prefetch_pool = None
+    prefetch_futs: list = []
     try:
         if cfg_path is None:
             candidate = os.path.join(SCRIPT_DIR, "..", "config", "capacity_config.json")
@@ -595,6 +639,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg_path = _ensure_org_cfg(cfg_path, work_dir)
         report_batch = [t for t in selected if t not in _IS_LETTER]
         is_letter = len(selected) == 1 and selected[0] in _IS_LETTER
+        if report_batch and not is_letter:
+            prefetch_pool, prefetch_futs = _begin_template_prefetch(report_batch)
         if is_letter:
             args.template = selected[0]
             files = _letter_pipeline(args, cfg_path, work_dir, report_date)
@@ -607,6 +653,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             calc_json = os.path.join(work_dir, "calc_result.json")
             _run(["calcCapacity.py", "--xls", source, "--period", "日",
                   "--out", calc_json, "--config", cfg_path], "承载力量化计算")
+            _finish_template_prefetch(prefetch_pool, prefetch_futs)
+            prefetch_pool, prefetch_futs = None, []
             files, charts = _run_report_batch(
                 args, report_batch, cfg_path, work_dir, report_date,
                 range_lo, range_hi, precomputed_calc=True)
@@ -621,6 +669,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 LOGGER.info("报告：%s（锚定 %s，图表 %d 张）", args.basename,
                             report_date.isoformat(), len(specs))
+            _finish_template_prefetch(prefetch_pool, prefetch_futs)
+            prefetch_pool, prefetch_futs = None, []
             final = _pipeline(args, cfg_path, work_dir, report_date, specs,
                               args.chart_mode)
             files = [os.path.abspath(final)]
@@ -632,6 +682,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001
         return _fail("UNEXPECTED", f"未预期异常：{exc}", EXIT_UNEXPECTED)
     finally:
+        _finish_template_prefetch(prefetch_pool, prefetch_futs)
         try:
             import fillReport as _fr
             _fr.end_shared_word()

@@ -19,8 +19,10 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
+import threading
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -52,6 +54,17 @@ _MATRIX_FONT_PT = 12.0
 _NOTE_PARA_RE = re.compile(r"^\s*注\s*[:：]")
 _CONT_TABLE_RE = re.compile(r"^[（(]?\s*续表\s*[）)]?$")
 _DOCX_CACHE: Dict[str, Tuple[float, str]] = {}
+_CONVERT_LOCKS: Dict[str, threading.Lock] = {}
+_CONVERT_GUARD = threading.Lock()
+
+
+def _convert_lock(path: str) -> threading.Lock:
+    with _CONVERT_GUARD:
+        lock = _CONVERT_LOCKS.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _CONVERT_LOCKS[path] = lock
+        return lock
 
 
 def _substitute(text: str, mapping: Dict[str, str]) -> str:
@@ -641,18 +654,27 @@ def render(template_docx: str, params: Dict[str, Any], out_path: str,
 
 
 def doc_to_docx_cached(doc_path: str) -> str:
-    """把 .doc 转成 .docx 并按源文件修改时间缓存，日/周/月不重复启动 LibreOffice。"""
+    """把 .doc 转成 .docx 并按源文件修改时间缓存，日/周/月不重复启动 LibreOffice。
+
+    磁盘上已有且不旧于模板的 docx 直接复用。并行转换同一文件时加锁。
+    """
     key = os.path.abspath(doc_path)
     if key.lower().endswith(".docx"):
         return key
-    mtime = os.path.getmtime(key)
-    hit = _DOCX_CACHE.get(key)
-    if hit is not None and hit[0] == mtime and os.path.isfile(hit[1]):
-        return hit[1]
-    cache_dir = os.path.join(tempfile.gettempdir(), "cap-tpl-docx")
-    produced = convert_doc_to_docx(key, cache_dir)
-    _DOCX_CACHE[key] = (mtime, produced)
-    return produced
+    with _convert_lock(key):
+        mtime = os.path.getmtime(key)
+        hit = _DOCX_CACHE.get(key)
+        if hit is not None and hit[0] == mtime and os.path.isfile(hit[1]):
+            return hit[1]
+        cache_dir = os.path.join(tempfile.gettempdir(), "cap-tpl-docx")
+        name = os.path.splitext(os.path.basename(key))[0] + ".docx"
+        produced = os.path.join(cache_dir, name)
+        if os.path.isfile(produced) and os.path.getmtime(produced) >= mtime:
+            _DOCX_CACHE[key] = (mtime, produced)
+            return produced
+        produced = convert_doc_to_docx(key, cache_dir)
+        _DOCX_CACHE[key] = (mtime, produced)
+        return produced
 
 
 def fill_docx(template_doc_path: str, params: Dict[str, Any], out_path: str) -> None:
@@ -662,12 +684,20 @@ def fill_docx(template_doc_path: str, params: Dict[str, Any], out_path: str) -> 
 
 
 def convert_doc_to_docx(doc_path: str, out_dir: str) -> str:
-    """用 LibreOffice 把 .doc 模板转成 .docx，不改原模板。"""
+    """用 LibreOffice 把 .doc 模板转成 .docx，不改原模板。
+
+    每次单独 UserInstallation，日/周/月三份模板可以同时转，不会抢同一份配置锁。
+    """
     os.makedirs(out_dir, exist_ok=True)
-    subprocess.run(
-        ["soffice", "--headless", "--norestore", "--convert-to", "docx",
-         "--outdir", out_dir, doc_path],
-        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    profile = tempfile.mkdtemp(prefix="lo-profile-")
+    try:
+        subprocess.run(
+            ["soffice", "--headless", "--norestore", "--nolockcheck",
+             f"-env:UserInstallation=file://{profile}",
+             "--convert-to", "docx", "--outdir", out_dir, doc_path],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
     name = os.path.splitext(os.path.basename(doc_path))[0] + ".docx"
     produced = os.path.join(out_dir, name)
     if not os.path.isfile(produced):
