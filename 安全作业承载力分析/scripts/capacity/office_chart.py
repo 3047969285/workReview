@@ -19,7 +19,7 @@ import re
 import tempfile
 import zipfile
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from xml.sax.saxutils import escape
 
 from openpyxl import Workbook
@@ -835,8 +835,9 @@ def _embedding_xlsx(spec: OfficeChartSpec) -> bytes:
         labels = list(reversed(labels))
         values = list(reversed(values))
     for i, (lab, val) in enumerate(zip(labels, values), start=2):
-        # 分类轴换行：单元格内真换行，供图绑定缓存使用
-        ws.cell(i, 1, str(lab).replace("\\n", "\n"))
+        # 与 chart.xml 一字一行一致，编辑数据簿时标签也不截断
+        show = lab if spec.horizontal else _wrap_cat_label(lab, len(labels))
+        ws.cell(i, 1, str(show).replace("\\n", "\n"))
         ws.cell(i, 2, int(round(float(val))))
     buf = io.BytesIO()
     wb.save(buf)
@@ -891,14 +892,72 @@ def _val_axis_title(unit: str) -> str:
     )
 
 
+def wrap_fixed_chars(text: str, width: int, break_char: str = "\n") -> str:
+    """按固定汉字数换行；已有换行 / \\v 分段各自处理，不截断原文。
+
+    width=1 → 分类轴一字一行；width=2 → 表内两字一行。
+    连续纯数字（如 272、15）整段保留，避免「27 / 2」拆开。
+    """
+    raw = "" if text is None else str(text)
+    if width <= 0 or not raw:
+        return raw
+
+    def _tokens(s: str) -> List[str]:
+        out: List[str] = []
+        buf = ""
+        digit = False
+        for ch in s:
+            is_digit = ch.isdigit()
+            if buf and is_digit != digit:
+                out.append(buf)
+                buf = ch
+                digit = is_digit
+            else:
+                if not buf:
+                    digit = is_digit
+                buf += ch
+        if buf:
+            out.append(buf)
+        return out
+
+    def _pack(s: str) -> str:
+        if len(s) <= width:
+            return s
+        # 数字整段：短数字不拆；超长数字仍按 width 切
+        tokens = _tokens(s)
+        lines: List[str] = []
+        cur = ""
+        for tok in tokens:
+            if tok.isdigit() and len(tok) <= 4:
+                pieces = [tok]
+            elif tok.isdigit():
+                pieces = [tok[i:i + width] for i in range(0, len(tok), width)]
+            else:
+                pieces = [tok[i:i + width] for i in range(0, len(tok), width)]
+            for piece in pieces:
+                if not cur:
+                    cur = piece
+                elif len(cur) + len(piece) <= width:
+                    cur += piece
+                else:
+                    lines.append(cur)
+                    cur = piece
+        if cur:
+            lines.append(cur)
+        return break_char.join(lines)
+
+    chunks: List[str] = []
+    for part in re.split(r"[\n\v]+", raw):
+        part = part.strip("\r")
+        chunks.append(_pack(part) if part else part)
+    return break_char.join(chunks)
+
+
 def _wrap_cat_label(lab: str, n_cats: int) -> str:
-    """分类轴标签：横排、不换行；类多时适度截断（与承载力图观感接近）。"""
-    s = str(lab).replace("\n", "").replace("\\n", "").strip()
-    if n_cats >= 16:
-        return s[:3]
-    if n_cats >= 12:
-        return s[:4]
-    return s
+    """分类轴标签：完整原文、一字一行，禁止截断（截断会造成柱多标签少的错觉）。"""
+    del n_cats  # 类多少都一字一行，不再按数量截断
+    s = str(lab).replace("\\n", "\n").strip()
+    return wrap_fixed_chars(s, 1, "\n")
 
 
 def _chart_xml(spec: OfficeChartSpec) -> str:
@@ -925,7 +984,8 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         gap = 120
     elif not spec.horizontal and n >= 8:
         gap = 100
-    cat_sz = "800" if n >= 12 else ("900" if n >= 8 else CHART_SZ)
+    # 一字一行后标签变高，略缩小字号避免挤柱
+    cat_sz = "700" if n >= 14 else ("800" if n >= 8 else "900")
     # 数量图与承载力图一致：柱顶外置标签
     dlbl_pos = "outEnd"
     dlbl_sz = "900" if (not spec.pct and n >= 10) else CHART_SZ
@@ -941,8 +1001,10 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
             f'<c:dPt><c:idx val="{i}"/><c:bubble3D val="0"/><c:spPr>'
             f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
             f'<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>')
+        # 换行用 &#10;，避免 XML 空白折叠导致一字一行失效
+        cat_xml = escape(show_lab).replace("\n", "&#10;")
         pts_cat.append(
-            f'<c:pt idx="{i}"><c:v>{escape(show_lab)}</c:v></c:pt>')
+            f'<c:pt idx="{i}"><c:v>{cat_xml}</c:v></c:pt>')
         pts_val.append(f'<c:pt idx="{i}"><c:v>{iv}</c:v></c:pt>')
     scaling = '<c:scaling><c:orientation val="minMax"/>'
     if vmax is not None:
@@ -953,6 +1015,7 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
     val_pos = "b" if spec.horizontal else "l"
     no_box = (
         '<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>')
+    # 模块约定：刻度自带 %，不写「项/%」轴标题（避免图1左侧「项」错位）
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
@@ -989,6 +1052,7 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         "<c:majorTickMark val=\"none\"/><c:minorTickMark val=\"none\"/>"
         "<c:tickLblPos val=\"nextTo\"/>"
         '<c:lblAlgn val="ctr"/><c:lblOffset val="100"/>'
+        '<c:tickLblSkip val="1"/>'
         f"{_tx_pr(0, cat_sz)}"
         "<c:crossAx val=\"2\"/>"
         "<c:crosses val=\"min\"/></c:catAx>"
@@ -997,7 +1061,6 @@ def _chart_xml(spec: OfficeChartSpec) -> str:
         "<c:majorGridlines>"
         '<c:spPr><a:ln w="6350"><a:solidFill><a:srgbClr val="D8DEE8"/>'
         "</a:solidFill></a:ln></c:spPr></c:majorGridlines>"
-        f"{_val_axis_title('%' if spec.pct else '项')}"
         f'<c:numFmt formatCode="{ax_fmt}" sourceLinked="0"/>'
         f"{_tx_pr(0)}"
         "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/>"
@@ -1038,25 +1101,27 @@ DETAIL_FONT_PT = 10.5
 DETAIL_LINE_PT = 16.0  # wdLineSpaceExactly
 DETAIL_COL_PREF = {
     "序号": 28.0,
-    "风险等级": 32.0,
+    "风险等级": 36.0,
     "作业内容": 150.0,
+    "高风险作业时间": 88.0,
     "时间": 72.0,
-    "日期": 72.0,
+    "日期": 56.0,
+    "班组成员人数": 44.0,
     "班组成员": 40.0,
     "人数": 40.0,
-    "工作负责人": 48.0,
+    "工作负责人": 52.0,
     "负责人": 48.0,
     "单位": 78.0,
 }
 DETAIL_COL_DEFAULT = 52.0
 
 # ---------- 图高策略：只给区间，运行时按剩余空间取值 ----------
-# 全月作业/管理（图2+图3 同页）
-H_MONTH_MIN, H_MONTH_MAX = 110.0, 130.0
+# 全月作业/管理（图2+图3 同页）；一字一行标签需要更高图
+H_MONTH_MIN, H_MONTH_MAX = 150.0, 190.0
 # 每周两图同页，图高拉到接近版心，避免一周一块下面大片空白
-H_WEEK_MIN, H_WEEK_MAX = 200.0, 250.0
-# 作业类型数量图：优先跟表末同页，否则独页放大
-H_TYPE_MIN, H_TYPE_MAX = 110.0, 200.0
+H_WEEK_MIN, H_WEEK_MAX = 220.0, 280.0
+# 作业类型数量图：类多+一字一行，独页放大
+H_TYPE_MIN, H_TYPE_MAX = 200.0, 320.0
 # 引导句+图注预留
 TYPE_TEXT_RESERVE_PT = 48.0
 # 周页标题/评述预留（两图分母）
@@ -1066,23 +1131,53 @@ _WEEK_TITLE_RE = re.compile(r"^[1-5]\.\d+月份第[1-5]周")
 
 
 def two_char_col_widths(n_cols: int, font_pt: float, text_w: float) -> List[float]:
-    """每列约两个汉字宽（字号即字宽），多余字在格内换行。
+    """每列至少两个汉字宽；有余量时拉满版心，格内仍两字软换行并居中。
 
     列总宽超过版心时等比收进，仍然只保留一张表，不拆续表。
     """
     n = max(int(n_cols), 1)
-    cell = max(float(font_pt), 10.5) * 2.0 + 2.0
+    # 汉字近似正方形：2 字宽 + 左右边距/边框余量，保证「两字一行」不会塌成一字
+    cell = max(float(font_pt), 10.5) * 2.0 + 8.0
     widths = [cell] * n
     total = cell * n
-    if text_w > 0 and total > text_w:
+    if text_w > 0 and total < text_w:
+        extra = (text_w - total) / n
+        widths = [w + extra for w in widths]
+    elif text_w > 0 and total > text_w:
+        scale = text_w / total
+        widths = [max(w * scale, float(font_pt) * 2.0 + 2.0) for w in widths]
+        total2 = sum(widths)
+        if total2 > text_w:
+            scale2 = text_w / total2
+            widths = [w * scale2 for w in widths]
+    return widths
+
+
+def detail_col_widths(headers: List[str], text_w: float) -> List[float]:
+    """工作计划概况明细表（序号表）：按列语义偏好宽，不做两字挤压。
+
+    超版心时才等比收进，保证作业内容等列可读；矩阵表请用 two_char_col_widths。
+    """
+    widths: List[float] = []
+    for header in headers:
+        name = str(header).strip()
+        chosen = DETAIL_COL_DEFAULT
+        # 长键优先（「高风险作业时间」先于「时间」）
+        for key, pref in sorted(DETAIL_COL_PREF.items(), key=lambda kv: -len(kv[0])):
+            if key in name:
+                chosen = float(pref)
+                break
+        widths.append(chosen)
+    total = sum(widths)
+    if text_w > 0 and total > text_w and total > 0:
         scale = text_w / total
         widths = [w * scale for w in widths]
     return widths
 
 
-def detail_col_widths(headers: List[str], text_w: float) -> List[float]:
-    """明细表列宽：每列两个汉字，长文本在单元格内自动换行。"""
-    return two_char_col_widths(len(headers), DETAIL_FONT_PT, text_w)
+def wrap_table_cell_text(text: Any) -> str:
+    """矩阵表等窄列：两字一行（软换行 \\v）。明细表不要调用本函数。"""
+    return wrap_fixed_chars("" if text is None else str(text), 2, "\v")
 
 
 def chart_height_pt(n_cats: int, *, kind: str) -> float:
@@ -1092,10 +1187,11 @@ def chart_height_pt(n_cats: int, *, kind: str) -> float:
     """
     n = max(int(n_cats), 1)
     if kind == "type":
-        return min(H_TYPE_MAX, max(H_TYPE_MIN, 150.0))
+        # 一字一行标签增高：类越多图越高
+        return min(H_TYPE_MAX, max(H_TYPE_MIN, 190.0 + 3.5 * n))
     if kind == "week":
-        return min(H_WEEK_MAX, max(H_WEEK_MIN, 132.0 + 0.4 * n))
-    return min(H_MONTH_MAX, max(H_MONTH_MIN, 112.0 + 0.4 * n))
+        return min(H_WEEK_MAX, max(H_WEEK_MIN, 210.0 + 1.2 * n))
+    return min(H_MONTH_MAX, max(H_MONTH_MIN, 155.0 + 1.0 * n))
 
 
 def _usable_height_pt(doc) -> float:
@@ -1401,11 +1497,9 @@ _MAX_CAPTION_LEN = 40          # 图题段长度上限（「图 N 公司…」�
 _NONE_UNIT = "其他"            # 无类型计划归类名（与 renderReportCharts 一致）
 
 
-def wrap_axis_label(s: str, width: int = 6) -> str:
-    """竖柱图长分类标签按字数折行（单元格内换行 \\n）。"""
-    if len(s) <= width:
-        return s
-    return "\n".join(s[i:i + width] for i in range(0, len(s), width))
+def wrap_axis_label(s: str, width: int = 1) -> str:
+    """竖柱图分类标签按字数折行；默认一字一行。"""
+    return wrap_fixed_chars(s, width, "\n")
 
 
 def _pct_axis_max(values: List[float]) -> float:

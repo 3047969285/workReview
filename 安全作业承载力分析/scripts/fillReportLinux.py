@@ -5,7 +5,8 @@
   - replace：段落与单元格全文子串替换（长键优先）
   - paragraph_replace：anchor + occurrence，可选 next_paragraph 整段覆盖
   - tables：按列名或 anchor 定位，覆盖表头、删示例行、写入数据行
-  - 矩阵表整表写入，列宽约两个汉字，格内换行，不拆续表
+  - 矩阵表整表写入，列宽约两个汉字、格内换行（周报日承载力等，代替续表）
+  - 工作计划概况明细表按列语义宽排，不两字挤压（月报/周报概况同口径）
   - 空明细表删除
   - trim_month_weeks
   - 日/周：替换模板承载力图位，并在引导句/评述句后插入作业类型图与管理承载力图
@@ -35,7 +36,8 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from capacity.office_chart import (
-    DETAIL_FONT_PT, DETAIL_LINE_PT, TEXT_WIDTH_FALLBACK_PT, two_char_col_widths)
+    DETAIL_FONT_PT, DETAIL_LINE_PT, TEXT_WIDTH_FALLBACK_PT,
+    detail_col_widths, two_char_col_widths, wrap_table_cell_text)
 from fillReport import TEMPLATES
 
 LOGGER = logging.getLogger("fillReportLinux")
@@ -266,9 +268,30 @@ def _set_run_font(run, name: str, size_pt: float, bold: bool) -> None:
         rfonts.set(qn(attr), name)
 
 
+def _ensure_cell_borders(cell) -> None:
+    """明细/矩阵表统一细黑边框，避免只剩表头线、正文漂浮。"""
+    tcpr = cell._tc.get_or_add_tcPr()
+    borders = tcpr.find(qn("w:tcBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tcBorders")
+        tcpr.append(borders)
+    for edge in ("top", "left", "bottom", "right"):
+        node = borders.find(qn(f"w:{edge}"))
+        if node is None:
+            node = OxmlElement(f"w:{edge}")
+            borders.append(node)
+        node.set(qn("w:val"), "single")
+        node.set(qn("w:sz"), "4")
+        node.set(qn("w:space"), "0")
+        node.set(qn("w:color"), "000000")
+
+
 def _set_cell_text(cell, value: Any, font: str, size_pt: float, bold: bool,
-                   line_pt: Optional[float]) -> None:
-    text = "" if value is None else str(value)
+                   line_pt: Optional[float],
+                   force_two_char_wrap: bool = False) -> None:
+    # 明细表（月/周工作计划概况）不挤压；矩阵表（周报日承载力等需续表口径）才两字软换行
+    raw = "" if value is None else str(value)
+    text = wrap_table_cell_text(raw) if force_two_char_wrap else raw
     paragraph = cell.paragraphs[0]
     for extra in cell.paragraphs[1:]:
         parent = extra._element.getparent()
@@ -307,6 +330,7 @@ def _set_cell_text(cell, value: Any, font: str, size_pt: float, bold: bool,
         v_align = OxmlElement("w:vAlign")
         tcpr.append(v_align)
     v_align.set(qn("w:val"), "center")
+    _ensure_cell_borders(cell)
 
 
 def _grid_cols(table: Table):
@@ -436,20 +460,30 @@ def _fill_one_table(doc: Document, table: Table, columns: List[str],
     font = "宋体"
     size = DETAIL_FONT_PT if is_detail else _MATRIX_FONT_PT
     line = DETAIL_LINE_PT if is_detail else None
+    # 概况明细（含月报）不挤压；周报矩阵等宽表才两字挤压（替代续表）
+    force_wrap = not is_detail
     header_cells = _unique_cells(table.rows[0])
     for index, name in enumerate(columns):
         if index < len(header_cells):
-            _set_cell_text(header_cells[index], name, font, size, True, line)
+            _set_cell_text(
+                header_cells[index], name, font, size, True, line,
+                force_two_char_wrap=force_wrap)
     _clear_data_rows(table)
     for data in rows:
         row = table.add_row()
         cells = _unique_cells(row)
         for index, value in enumerate(data):
             if index < len(cells):
-                _set_cell_text(cells[index], value, font, size, False, line)
+                _set_cell_text(
+                    cells[index], value, font, size, False, line,
+                    force_two_char_wrap=force_wrap)
     if is_detail:
         _mark_header_row(table)
-    widths = two_char_col_widths(len(columns), size, _text_width_pt(doc))
+    text_w = _text_width_pt(doc)
+    if is_detail:
+        widths = detail_col_widths(columns, text_w)
+    else:
+        widths = two_char_col_widths(len(columns), size, text_w)
     _set_widths(table, widths)
 
 
