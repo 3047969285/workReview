@@ -1101,13 +1101,15 @@ DETAIL_FONT_PT = 10.5
 DETAIL_LINE_PT = 16.0  # wdLineSpaceExactly
 DETAIL_COL_PREF = {
     "序号": 28.0,
-    "风险等级": 32.0,
+    "风险等级": 36.0,
     "作业内容": 150.0,
+    "高风险作业时间": 88.0,
     "时间": 72.0,
-    "日期": 72.0,
+    "日期": 56.0,
+    "班组成员人数": 44.0,
     "班组成员": 40.0,
     "人数": 40.0,
-    "工作负责人": 48.0,
+    "工作负责人": 52.0,
     "负责人": 48.0,
     "单位": 78.0,
 }
@@ -1152,12 +1154,29 @@ def two_char_col_widths(n_cols: int, font_pt: float, text_w: float) -> List[floa
 
 
 def detail_col_widths(headers: List[str], text_w: float) -> List[float]:
-    """明细表列宽：每列两个汉字，长文本在单元格内两字换行。"""
-    return two_char_col_widths(len(headers), DETAIL_FONT_PT, text_w)
+    """工作计划概况明细表（序号表）：按列语义偏好宽，不做两字挤压。
+
+    超版心时才等比收进，保证作业内容等列可读；矩阵表请用 two_char_col_widths。
+    """
+    widths: List[float] = []
+    for header in headers:
+        name = str(header).strip()
+        chosen = DETAIL_COL_DEFAULT
+        # 长键优先（「高风险作业时间」先于「时间」）
+        for key, pref in sorted(DETAIL_COL_PREF.items(), key=lambda kv: -len(kv[0])):
+            if key in name:
+                chosen = float(pref)
+                break
+        widths.append(chosen)
+    total = sum(widths)
+    if text_w > 0 and total > text_w and total > 0:
+        scale = text_w / total
+        widths = [w * scale for w in widths]
+    return widths
 
 
 def wrap_table_cell_text(text: Any) -> str:
-    """表内正文：两字一行（软换行 \\v，Word/WPS/python-docx 均可识别）。"""
+    """矩阵表等窄列：两字一行（软换行 \\v）。明细表不要调用本函数。"""
     return wrap_fixed_chars("" if text is None else str(text), 2, "\v")
 
 

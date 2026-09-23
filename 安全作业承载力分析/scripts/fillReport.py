@@ -840,17 +840,24 @@ class WordSession:
                 existing.append("")
             except Exception:
                 break
+        is_detail = bool(columns) and str(columns[0]).strip() == "序号"
         for c, want in enumerate(columns, start=1):
             got = existing[c - 1] if c - 1 < len(existing) else ""
-            try:
-                from capacity.office_chart import wrap_table_cell_text
-                want_write = wrap_table_cell_text(want)
-            except Exception:
+            if is_detail:
                 want_write = str(want)
-            # 去掉软换行后比较；已是目标且已两字换行则跳过，保护表前并入段落
+            else:
+                try:
+                    from capacity.office_chart import wrap_table_cell_text
+                    want_write = wrap_table_cell_text(want)
+                except Exception:
+                    want_write = str(want)
+            # 去掉软换行后比较；已是目标则跳过，保护表前并入段落
             got_flat = got.replace("\v", "").replace("\n", "")
             want_flat = str(want).replace("\v", "").replace("\n", "")
-            if got_flat == want_flat and ("\v" in got or len(want_flat) <= 2):
+            if is_detail:
+                if got_flat == want_flat:
+                    continue
+            elif got_flat == want_flat and ("\v" in got or len(want_flat) <= 2):
                 continue
             try:
                 cell = target.Cell(1, c)
@@ -885,8 +892,13 @@ class WordSession:
                 if c > header_cols:
                     break
                 try:
-                    from capacity.office_chart import wrap_table_cell_text
-                    target.Cell(offset, c).Range.Text = wrap_table_cell_text(value)
+                    if is_detail:
+                        target.Cell(offset, c).Range.Text = (
+                            "" if value is None else str(value))
+                    else:
+                        from capacity.office_chart import wrap_table_cell_text
+                        target.Cell(offset, c).Range.Text = wrap_table_cell_text(
+                            value)
                 except Exception:
                     pass
         # v2.9 明细表排版修复（仅首列「序号」的明细表生效，矩阵/汇总表不动）：
