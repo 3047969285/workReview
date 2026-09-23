@@ -30,9 +30,9 @@
 ------------------------------------------------------------
 二、填充要点
 ------------------------------------------------------------
-  1) 概况句：日计划项数 / 二级 / 三级 风险项数（按计划与报告周期交叠统计）；
-  2) 明细表：默认三级及以上风险（二级/三级）计划；若当期存在超100% 的计划则只写
-     “超过的那些计划”（不限等级），数据量大时按 单位×风险等级 分组抽样保维度；
+  1) 概况句：日计划项数 / 三级 / 四级 / 五级 风险项数；
+  2) 明细表：在三/四/五级中选**数量最少**的一档列表（并列优先三级），标题动态为
+     「X级风险工作明细表如下」；不展示数量庞大的档；
      日=工作负责人真名+班组成员人数，周=工作负责人真名+班组成员人数+高风险作业时间，
      月=仅高风险作业时间（不输出人员）；
      3) 作业承载力评述段：按单位-周期累加承载力（Σ自然日日值 / 工作日天数）分 满载(≥90)/重载(75~90)，
@@ -328,35 +328,60 @@ def _unit_of_plan(normalizer: UnitNormalizer, p) -> str:
 
 
 def _build_summary(plans, normalizer) -> Dict[str, int]:
-    """概况句计数：日计划项数 / 二级 / 三级。"""
+    """概况句计数：日计划项数 / 三级 / 四级 / 五级。"""
+    del normalizer
     total = len(plans)
-    two = sum(1 for p in plans if p.risk == "二级")
-    three = sum(1 for p in plans if p.risk == "三级")
-    return {"total": total, "二级": two, "三级": three}
+    return {
+        "total": total,
+        "二级": sum(1 for p in plans if p.risk == "二级"),
+        "三级": sum(1 for p in plans if p.risk == "三级"),
+        "四级": sum(1 for p in plans if p.risk == "四级"),
+        "五级": sum(1 for p in plans if p.risk == "五级"),
+    }
 
 
-def _select_detail_plans(plans) -> list:
-    """三级及以上风险（二级/三级）计划全部列出，动态扩行、不设行数上限。
-
-    明细表须与概况句「二级X项 三级Y项」完全一致：有多少条列多少条，Word
-    表格按行数自动扩行（fillReport._fill_table_data 动态 Rows.Add），不再做
-    超限优先筛选或固定行数抽样截断，保证「文说显示、表就显示」。
-    """
-    return [p for p in plans
-            if (lv := _risk_num(p.risk)) is not None and 1 <= lv <= 3]
+def _risk_count_phrase(summary: Dict[str, int]) -> str:
+    """概况句：三级、四级、五级各多少项。"""
+    return (
+        f"三级风险作业{summary.get('三级', 0)}项、"
+        f"四级风险作业{summary.get('四级', 0)}项、"
+        f"五级风险作业{summary.get('五级', 0)}项"
+    )
 
 
-def _build_detail_rows(plans, normalizer, with_leader: bool = False,
+# 明细表候选等级：数量相对少的一档才列表（并列取更高风险）
+_DETAIL_RISK_LEVELS = ("三级", "四级", "五级")
+_DETAIL_CAPTION_KEY = "X级风险工作明细表如下："
+
+
+def _pick_detail_risk_level(summary: Dict[str, int]) -> Optional[str]:
+    """在三/四/五级中选数量最少且>0的一档；并列时优先三级>四级>五级。"""
+    cands = [(lv, int(summary.get(lv, 0) or 0))
+             for lv in _DETAIL_RISK_LEVELS
+             if int(summary.get(lv, 0) or 0) > 0]
+    if not cands:
+        return None
+    min_n = min(n for _, n in cands)
+    for lv, n in cands:
+        if n == min_n:
+            return lv
+    return None
+
+
+def _select_detail_plans(plans, risk_level: Optional[str]) -> list:
+    """只列「数量相对少」的那一档风险；无候选则空表。"""
+    if not risk_level:
+        return []
+    return [p for p in plans if str(p.risk or "") == risk_level]
+
+
+def _build_detail_rows(plans, normalizer, risk_level: Optional[str],
+                       with_leader: bool = False,
                        with_members: bool = False,
                        with_time: bool = False) -> List[List[str]]:
-    """明细表行：三级及以上风险（二级/三级）全部列出，动态扩行不设上限。
-
-    人员分析：with_leader 输出工作负责人真名（不脱敏），with_members 输出
-    班组成员人数（= 计划“所需自有人员人数”）。月报表不传二者，实现“月/年
-    不输出人员”。
-    """
+    """明细表行：仅所选风险等级；日/周可带人员，月不带人员。"""
     rows: List[List[str]] = []
-    for p in _select_detail_plans(plans):
+    for p in _select_detail_plans(plans, risk_level):
         unit = _unit_of_plan(normalizer, p)
         row: List[str] = [str(len(rows) + 1), unit, p.name, str(p.risk or "")]
         if with_leader:
@@ -367,6 +392,16 @@ def _build_detail_rows(plans, normalizer, with_leader: bool = False,
             row.append(_fmt_plan_time(p))
         rows.append(row)
     return rows
+
+
+def _apply_detail_caption(replace: Dict[str, str], risk_level: Optional[str],
+                          period_label: str) -> None:
+    """动态改写「X级风险工作明细表如下：」。"""
+    if risk_level:
+        replace[_DETAIL_CAPTION_KEY] = f"{risk_level}风险工作明细表如下："
+    else:
+        replace[_DETAIL_CAPTION_KEY] = (
+            f"{period_label}无数量较少的风险等级可列明细。")
 
 
 def _unit_profile(dataset, normalizer, lo: date, hi: date,
@@ -566,10 +601,8 @@ def _advice_from_numbers(period: str, summary: Dict[str, int],
                          mgmt: Dict[str, Any]) -> str:
     """建议章只引用本次算出的项数、单位和百分比，不采用外部自由正文。"""
     bits = [f"{period}日计划{summary.get('total', 0)}项"]
-    if summary.get("二级"):
-        bits.append(f"二级风险{summary['二级']}项")
-    if summary.get("三级"):
-        bits.append(f"三级风险{summary['三级']}项")
+    for level in ("三级", "四级", "五级"):
+        bits.append(f"{level}风险{summary.get(level, 0)}项")
     text = "，".join(bits) + "。"
     ranked = sorted(
         ((u, cap) for u, cap, _ in profile if cap > 0),
@@ -612,20 +645,16 @@ def build_daily_params(result, dataset, normalizer,
     replace = {
         "2026年X月X日": f"2026年{report_date.month}月{report_date.day}日",
         "日计划X项": f"日计划{summary['total']}项",
-        "二级风险作业X项": f"二级风险作业{summary['二级']}项",
-        "三级风险作业X项": f"三级风险作业{summary['三级']}项",
+        "三级风险作业X项、四级风险作业X项、五级风险作业X项":
+            _risk_count_phrase(summary),
         KEY_JOBBLOCK_A: _build_job_block(profile),
         KEY_ADVICE_BODY: _advice_from_numbers("当日", summary, profile, mgmt),
     }
-    detail_rows = _build_detail_rows(p, normalizer,
-                                     with_leader=True, with_members=True)
-    if not detail_rows:
-        # 本周期无三级及以上（或超限）计划可列：概况句不再以「…明细表如下：」
-        # 悬挂，直接自然收尾；空明细表整体删除由 fillReport 按 rows=[] 处理。
-        replace["三级及以上风险工作明细表如下："] = (
-            "当日三级及以上风险作业不单列明细。")
-        replace[KEY_ADVICE_BODY] = _advice_from_numbers(
-            "当日", summary, profile, mgmt)
+    detail_level = _pick_detail_risk_level(summary)
+    detail_rows = _build_detail_rows(
+        p, normalizer, detail_level,
+        with_leader=True, with_members=True)
+    _apply_detail_caption(replace, detail_level, "当日")
     return {
         "replace": replace,
         "paragraph_replace": [
@@ -667,20 +696,17 @@ def build_weekly_params(result, dataset, normalizer,
         KEY_WEEK_TITLE_GENERIC:
             f"{m}月份第{ordinal}周{_fmt_d(wk_lo)}至{_fmt_d(wk_hi)}",
         "日计划X项": f"日计划{summary['total']}项",
-        "二级风险作业X项": f"二级风险作业{summary['二级']}项",
-        "三级风险作业X项": f"三级风险作业{summary['三级']}项",
+        "三级风险作业X项、四级风险作业X项、五级风险作业X项":
+            _risk_count_phrase(summary),
         KEY_JOBBLOCK_A: _build_job_block(profile),
         KEY_WEEK_DAILY_ANALYSIS: _week_over_analysis(cap_by_day, wk_lo, wk_hi),
         KEY_ADVICE_BODY: _advice_from_numbers("本周", summary, profile, mgmt),
     }
-    detail_rows = _build_detail_rows(p, normalizer,
-                                     with_leader=True, with_members=True,
-                                     with_time=True)
-    if not detail_rows:
-        replace["三级及以上风险工作明细表如下："] = (
-            "本周三级及以上风险作业不单列明细。")
-        replace[KEY_ADVICE_BODY] = _advice_from_numbers(
-            "本周", summary, profile, mgmt)
+    detail_level = _pick_detail_risk_level(summary)
+    detail_rows = _build_detail_rows(
+        p, normalizer, detail_level,
+        with_leader=True, with_members=True, with_time=True)
+    _apply_detail_caption(replace, detail_level, "本周")
     # 周跨月时标题周也跨月（罕见），仍按报告星期号处理即可
     return {
         "replace": replace,
@@ -727,20 +753,18 @@ def build_monthly_params(result, dataset, normalizer,
         "2026年X月份": f"2026年{m}月份",
         "X月份": f"{m}月份",
         "日计划X项": f"日计划{summary['total']}项",
-        "二级风险作业X项": f"二级风险作业{summary['二级']}项",
-        "三级风险作业X项": f"三级风险作业{summary['三级']}项",
+        "三级风险作业X项、四级风险作业X项、五级风险作业X项":
+            _risk_count_phrase(summary),
         KEY_JOBBLOCK_A: _build_job_block(profile),
         # v2.12：全月管理评述句尾引用图2 全月管理承力图（无句号，模板段自带「。」保留）
         KEY_MONTH_MANAGE: _manage_sentence(f"全月", mgmt) + "，如图 3所示",
         KEY_ADVICE_BODY: _advice_from_numbers("本月", summary, profile, mgmt),
     }
-    detail_rows = _build_detail_rows(p, normalizer,
-                                     with_leader=False, with_time=True)
-    if not detail_rows:
-        replace["三级及以上风险工作明细表如下："] = (
-            "当月三级及以上风险作业不单列明细。")
-        replace[KEY_ADVICE_BODY] = _advice_from_numbers(
-            "本月", summary, profile, mgmt)
+    detail_level = _pick_detail_risk_level(summary)
+    detail_rows = _build_detail_rows(
+        p, normalizer, detail_level,
+        with_leader=False, with_time=True)
+    _apply_detail_caption(replace, detail_level, "当月")
     # 第1周标题（通用占位）与 2~5 周标题（模板硬编码 5 月示例）
     if w1:
         replace[KEY_WEEK_TITLE_GENERIC] = (
